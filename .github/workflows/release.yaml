@@ -1,4 +1,4 @@
-name: Create release on github
+name: Create release
 
 on:
   workflow_run:
@@ -9,18 +9,22 @@ on:
 
 jobs:
   release:
-    name: Prepare github release
-    runs-on: ubuntu-24.04
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    permissions:
+      contents: write
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_branch }}
 
-      - name: Download artifacts from build stage
-        uses: dawidd6/action-download-artifact@v6
+      - name: Download artifacts from build workflow
+        uses: dawidd6/action-download-artifact@v7
         with:
           workflow: build.yaml
           run_id: ${{ github.event.workflow_run.id }}
@@ -28,31 +32,21 @@ jobs:
           name_is_regexp: true
           path: releases/
 
-      - name: Flatten all downloaded artifacts to a single directory
-        shell: bash
+      - name: Flatten artifacts to single directory
         run: |
           cd releases/
           find . -type f -exec mv '{}' ./ \;
           find . -type d -empty -delete
+          ls -la
 
-      - uses: actions-ecosystem/action-regex-match@v2
-        id: match-tag
-        with:
-          text: ${{ github.event.workflow_run.head_branch }}
-          regex: '^v([0-9]+\.\d+\.\d+)$'
+      - name: Generate sha256 checksums
+        run: |
+          cd releases/
+          sha256sum *.tar.gz > checksums.sha256
+          cat checksums.sha256
 
-      - name: Generate sha256 checksum and gpg signatures for release artifacts
-        if: ${{ steps.match-tag.outputs.match != '' }}
-        uses: livepeer/action-gh-checksum-and-gpg-sign@latest
-        with:
-          artifacts-dir: releases
-          release-name: ${{ github.event.workflow_run.head_branch }}
-          gpg-key: ${{ secrets.CI_GPG_SIGNING_KEY }}
-          gpg-key-passphrase: ${{ secrets.CI_GPG_SIGNING_PASSPHRASE }}
-
-      - name: Release to github
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
-        if: ${{ steps.match-tag.outputs.match != '' }}
         with:
           generate_release_notes: true
           tag_name: ${{ github.event.workflow_run.head_branch }}

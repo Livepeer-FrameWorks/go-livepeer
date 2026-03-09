@@ -82,7 +82,7 @@ ifeq ($(BUILDOS),linux)
 		ifeq ($(GOARCH),arm64)
 			ifeq ($(GOOS),linux)
 				cgo_cflags += --target=aarch64-linux-gnu
-				cgo_ldflags += --target=aarch64-linux-gnu
+				cgo_ldflags += --target=aarch64-linux-gnu -fuse-ld=lld
 				cc = clang
 			endif
 		endif
