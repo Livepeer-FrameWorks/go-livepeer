@@ -241,19 +241,6 @@ func runTranscode(n *core.LivepeerNode, orchAddr string, httpc *http.Client, not
 			clog.Errorf(ctx, "Could not create multipart part err=%q", err)
 		}
 		io.Copy(fw, bytes.NewBuffer(v.Data))
-		// Add perceptual hash data as a part if generated
-		if md.CalcPerceptualHash {
-			w.SetBoundary(boundary)
-			hdrs := textproto.MIMEHeader{
-				"Content-Type":   {"application/octet-stream"},
-				"Content-Length": {strconv.Itoa(len(v.PHash))},
-			}
-			fw, err := w.CreatePart(hdrs)
-			if err != nil {
-				clog.Errorf(ctx, "Could not create multipart part err=%q", err)
-			}
-			io.Copy(fw, bytes.NewBuffer(v.PHash))
-		}
 	}
 	w.Close()
 	contentType = "multipart/mixed; boundary=" + boundary
@@ -414,16 +401,6 @@ func (h *lphttp) TranscodeResults(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				segments = append(segments, &core.TranscodedSegmentData{Data: body, Pixels: encodedPixels})
-			} else if p.Header.Get("Content-Type") == "application/octet-stream" {
-				// Perceptual hash data for last segment
-				if len(segments) > 0 {
-					segments[len(segments)-1].PHash = body
-				} else {
-					err := errors.New("Unknown perceptual hash")
-					glog.Error("No previous segment present to attach perceptual hash data to: ", err)
-					res.Err = err
-					break
-				}
 			}
 		}
 		res.TranscodeData = &core.TranscodeData{

@@ -20,7 +20,8 @@ RUN	apt update \
 	&& curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 15 -o /usr/share/keyrings/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
 	&& printf '%s\n' "deb [arch=${BUILDARCH} signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-14 main" > /etc/apt/sources.list.d/llvm-toolchain-14.list \
 	&& apt update \
-	&& apt -yqq install clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python docker-ce-cli pciutils gcc-multilib libgcc-8-dev-arm64-cross gcc-mingw-w64-x86-64 zlib1g zlib1g-dev libx264-dev libfdk-aac-dev
+	&& apt -yqq install clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python python3-pip docker-ce-cli pciutils gcc-multilib libgcc-8-dev-arm64-cross libstdc++-8-dev-arm64-cross gcc-mingw-w64-x86-64 zlib1g zlib1g-dev libx264-dev libfdk-aac-dev cmake ninja-build \
+	&& pip3 install meson
 
 RUN	update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 30 \
 	&& update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 30 \

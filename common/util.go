@@ -149,6 +149,8 @@ func FFmpegProfiletoNetProfile(ffmpegProfiles []ffmpeg.VideoProfile) ([]*net.Vid
 			encoder = net.VideoProfile_VP8
 		case ffmpeg.VP9:
 			encoder = net.VideoProfile_VP9
+		case ffmpeg.AV1:
+			encoder = net.VideoProfile_AV1
 		default:
 			return nil, ErrProfEncoder
 		}
@@ -450,6 +452,13 @@ func detectNvidiaDevices() ([]string, error) {
 func ParseAccelDevices(devices string, acceleration ffmpeg.Acceleration) ([]string, error) {
 	if acceleration == ffmpeg.Nvidia && devices == "all" {
 		return detectNvidiaDevices()
+	}
+	if acceleration == ffmpeg.QSV && devices == "all" {
+		return detectQSVDevices()
+	}
+	if acceleration == ffmpeg.Videotoolbox {
+		// VideoToolbox has no device paths — always route through platform detection
+		return detectVideotoolboxDevices()
 	}
 	return strings.Split(devices, ","), nil
 }

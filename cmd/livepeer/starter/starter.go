@@ -125,6 +125,8 @@ type LivepeerConfig struct {
 	CurrentManifest            *bool
 	Nvidia                     *string
 	Netint                     *string
+	QSV                        *string
+	Videotoolbox               *string
 	HevcDecoding               *bool
 	TestTranscoder             *bool
 	GatewayHost                *string
@@ -239,6 +241,8 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultCurrentManifest := false
 	defaultNvidia := ""
 	defaultNetint := ""
+	defaultQSV := ""
+	defaultVideotoolbox := ""
 	defaultHevcDecoding := false
 	defaultTestTranscoder := true
 
@@ -371,6 +375,8 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		CurrentManifest:      &defaultCurrentManifest,
 		Nvidia:               &defaultNvidia,
 		Netint:               &defaultNetint,
+		QSV:                  &defaultQSV,
+		Videotoolbox:         &defaultVideotoolbox,
 		HevcDecoding:         &defaultHevcDecoding,
 		TestTranscoder:       &defaultTestTranscoder,
 
@@ -523,8 +529,21 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		core.MaxSessions = intMaxSessions
 	}
 
-	if *cfg.Netint != "" && *cfg.Nvidia != "" {
-		glog.Exit("both -netint and -nvidia arguments specified, this is not supported")
+	hwAccelCount := 0
+	if *cfg.Nvidia != "" {
+		hwAccelCount++
+	}
+	if *cfg.Netint != "" {
+		hwAccelCount++
+	}
+	if *cfg.QSV != "" {
+		hwAccelCount++
+	}
+	if *cfg.Videotoolbox != "" {
+		hwAccelCount++
+	}
+	if hwAccelCount > 1 {
+		glog.Exit("only one hardware acceleration flag (-nvidia, -netint, -qsv, -videotoolbox) can be specified at a time")
 	}
 
 	// Identify this instance using service address (preferred) or Ethereum address if available.
@@ -672,6 +691,14 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			accel = ffmpeg.Netint
 			devicesStr = *cfg.Netint
 		}
+		if *cfg.QSV != "" {
+			accel = ffmpeg.QSV
+			devicesStr = *cfg.QSV
+		}
+		if *cfg.Videotoolbox != "" {
+			accel = ffmpeg.Videotoolbox
+			devicesStr = *cfg.Videotoolbox
+		}
 		if accel != ffmpeg.Software {
 			accelName := ffmpeg.AccelerationNameLookup[accel]
 			tf, err := core.GetTranscoderFactoryByAccel(accel)
@@ -699,7 +726,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			n.Transcoder = core.NewLoadBalancingTranscoder(devices, tf)
 		} else {
 			// for local software mode, enable most capabilities but remove expensive decoders and non-H264 encoders
-			capsToRemove := []core.Capability{core.Capability_HEVC_Decode, core.Capability_HEVC_Encode, core.Capability_VP8_Encode, core.Capability_VP9_Decode, core.Capability_VP9_Encode}
+			capsToRemove := []core.Capability{core.Capability_HEVC_Decode, core.Capability_HEVC_Encode, core.Capability_VP8_Encode, core.Capability_VP9_Decode, core.Capability_VP9_Encode, core.Capability_AV1_Decode, core.Capability_AV1_Encode}
 			caps := core.OptionalCapabilities()
 			for _, c := range capsToRemove {
 				caps = core.RemoveCapability(caps, c)

@@ -91,6 +91,16 @@ type NetintTranscoder struct {
 	session *ffmpeg.Transcoder
 }
 
+type QSVTranscoder struct {
+	device  string
+	session *ffmpeg.Transcoder
+}
+
+type VideotoolboxTranscoder struct {
+	device  string
+	session *ffmpeg.Transcoder
+}
+
 func (nv *NetintTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (td *TranscodeData, retErr error) {
 	// Returns UnrecoverableError instead of panicking to gracefully notify orchestrator about transcoder's failure
 	defer recoverFromPanic(&retErr)
@@ -170,6 +180,76 @@ func (nv *NvidiaTranscoder) EndTranscodingSession(sessionId string) {
 
 func (nt *NetintTranscoder) EndTranscodingSession(sessionId string) {
 	nt.Stop()
+}
+
+func (q *QSVTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (td *TranscodeData, retErr error) {
+	defer recoverFromPanic(&retErr)
+
+	in := &ffmpeg.TranscodeOptionsIn{
+		Fname:   md.Fname,
+		Accel:   ffmpeg.QSV,
+		Device:  q.device,
+		Profile: md.ProfileIn,
+	}
+	profiles := md.Profiles
+	out := profilesToTranscodeOptions(WorkDir, ffmpeg.QSV, md)
+
+	_, seqNo, parseErr := parseURI(md.Fname)
+	start := time.Now()
+
+	res, err := q.session.Transcode(in, out)
+	if err != nil {
+		return nil, err
+	}
+
+	if monitor.Enabled && parseErr == nil {
+		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
+	}
+
+	return resToTranscodeData(ctx, res, out)
+}
+
+func (q *QSVTranscoder) EndTranscodingSession(sessionId string) {
+	q.Stop()
+}
+
+func (q *QSVTranscoder) Stop() {
+	q.session.StopTranscoder()
+}
+
+func (vt *VideotoolboxTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (td *TranscodeData, retErr error) {
+	defer recoverFromPanic(&retErr)
+
+	in := &ffmpeg.TranscodeOptionsIn{
+		Fname:   md.Fname,
+		Accel:   ffmpeg.Videotoolbox,
+		Device:  vt.device,
+		Profile: md.ProfileIn,
+	}
+	profiles := md.Profiles
+	out := profilesToTranscodeOptions(WorkDir, ffmpeg.Videotoolbox, md)
+
+	_, seqNo, parseErr := parseURI(md.Fname)
+	start := time.Now()
+
+	res, err := vt.session.Transcode(in, out)
+	if err != nil {
+		return nil, err
+	}
+
+	if monitor.Enabled && parseErr == nil {
+		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
+	}
+
+	return resToTranscodeData(ctx, res, out)
+}
+
+func (vt *VideotoolboxTranscoder) EndTranscodingSession(sessionId string) {
+	vt.Stop()
+}
+
+func (vt *VideotoolboxTranscoder) Stop() {
+	vt.session.StopTranscoder()
 }
 
 type transcodeTestParams struct {
@@ -359,6 +439,10 @@ func GetTranscoderFactoryByAccel(acceleration ffmpeg.Acceleration) (func(device 
 		return NewNvidiaTranscoder, nil
 	case ffmpeg.Netint:
 		return NewNetintTranscoder, nil
+	case ffmpeg.QSV:
+		return NewQSVTranscoder, nil
+	case ffmpeg.Videotoolbox:
+		return NewVideotoolboxTranscoder, nil
 	default:
 		return nil, ffmpeg.ErrTranscoderHw
 	}
@@ -374,6 +458,20 @@ func NewNvidiaTranscoder(gpu string) TranscoderSession {
 func NewNetintTranscoder(gpu string) TranscoderSession {
 	return &NetintTranscoder{
 		device:  gpu,
+		session: ffmpeg.NewTranscoder(),
+	}
+}
+
+func NewQSVTranscoder(device string) TranscoderSession {
+	return &QSVTranscoder{
+		device:  device,
+		session: ffmpeg.NewTranscoder(),
+	}
+}
+
+func NewVideotoolboxTranscoder(device string) TranscoderSession {
+	return &VideotoolboxTranscoder{
+		device:  device,
 		session: ffmpeg.NewTranscoder(),
 	}
 }
@@ -413,21 +511,7 @@ func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts 
 			clog.Errorf(ctx, "Cannot read transcoded output for name=%s", oname)
 			return nil, err
 		}
-		// Extract perceptual hash if calculated
-		var s []byte = nil
-		if opts[i].CalcSign {
-			sigfile := oname + ".bin"
-			s, err = ioutil.ReadFile(sigfile)
-			if err != nil {
-				clog.Errorf(ctx, "Cannot read perceptual hash at name=%s", sigfile)
-				return nil, err
-			}
-			err = os.Remove(sigfile)
-			if err != nil {
-				clog.Errorf(ctx, "Cannot delete perceptual hash after reading name=%s", sigfile)
-			}
-		}
-		segments = append(segments, &TranscodedSegmentData{Data: o, Pixels: res.Encoded[i].Pixels, PHash: s})
+		segments = append(segments, &TranscodedSegmentData{Data: o, Pixels: res.Encoded[i].Pixels})
 		os.Remove(oname)
 	}
 
@@ -439,10 +523,9 @@ func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts 
 
 func profilesToTranscodeOptions(workDir string, accel ffmpeg.Acceleration, md *SegTranscodingMetadata) []ffmpeg.TranscodeOptions {
 	var (
-		profiles  []ffmpeg.VideoProfile = md.Profiles
-		calcPHash bool                  = md.CalcPerceptualHash
-		segPar    *SegmentParameters    = md.SegmentParameters
-		metadata  map[string]string     = md.Metadata
+		profiles []ffmpeg.VideoProfile = md.Profiles
+		segPar   *SegmentParameters    = md.SegmentParameters
+		metadata map[string]string     = md.Metadata
 	)
 
 	opts := make([]ffmpeg.TranscodeOptions, len(profiles))
@@ -452,7 +535,6 @@ func profilesToTranscodeOptions(workDir string, accel ffmpeg.Acceleration, md *S
 			Profile:      profiles[i],
 			Accel:        accel,
 			AudioEncoder: ffmpeg.ComponentOptions{Name: "copy"},
-			CalcSign:     calcPHash,
 			Metadata:     metadata,
 		}
 		if segPar != nil && segPar.Clip != nil {

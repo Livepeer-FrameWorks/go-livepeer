@@ -95,7 +95,7 @@ func (r *livePaymentSender) SendPayment(ctx context.Context, segmentInfo *Segmen
 	}
 
 	// Generate segment credentials with an empty segment
-	segCreds, err := genSegCreds(sess, &stream.HLSSegment{}, nil, false)
+	segCreds, err := genSegCreds(sess, &stream.HLSSegment{}, nil)
 	if err != nil {
 		return err
 	}
