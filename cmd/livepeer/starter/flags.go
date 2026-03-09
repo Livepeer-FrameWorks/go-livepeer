@@ -148,6 +148,12 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.KafkaPassword = fs.String("kafkaPassword", *cfg.KafkaPassword, "Kafka Password")
 	cfg.KafkaGatewayTopic = fs.String("kafkaGatewayTopic", *cfg.KafkaGatewayTopic, "Kafka Topic used to send gateway logs")
 
+	// Auto-deposit
+	cfg.AutoDeposit = fs.Bool("autoDeposit", *cfg.AutoDeposit, "Enable auto-deposit: fund TicketBroker deposit from wallet balance when deposit runs low")
+	cfg.AutoDepositMinDeposit = fs.String("autoDepositMinDeposit", *cfg.AutoDepositMinDeposit, "Minimum TicketBroker deposit in wei before auto-deposit triggers (default 0.1 ETH)")
+	cfg.AutoDepositGasReserve = fs.String("autoDepositGasReserve", *cfg.AutoDepositGasReserve, "ETH to keep in wallet for gas when auto-depositing, in wei (default 0.01 ETH)")
+	cfg.AutoDepositInterval = fs.Duration("autoDepositInterval", *cfg.AutoDepositInterval, "Interval between auto-deposit checks")
+
 	return cfg
 }
 

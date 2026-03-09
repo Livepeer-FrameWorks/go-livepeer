@@ -190,6 +190,12 @@ type LivepeerConfig struct {
 	LiveAICapReportInterval    *time.Duration
 	LiveAICapRefreshModels     *string
 	LiveAISaveNSegments        *int
+
+	// Auto-deposit: gateway auto-funds TicketBroker when deposit runs low
+	AutoDeposit           *bool
+	AutoDepositMinDeposit *string
+	AutoDepositGasReserve *string
+	AutoDepositInterval   *time.Duration
 }
 
 // DefaultLivepeerConfig creates LivepeerConfig exactly the same as when no flags are passed to the livepeer process.
@@ -315,6 +321,12 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultKafkaPassword := ""
 	defaultKafkaGatewayTopic := ""
 
+	// Auto-deposit: deposit balance - gasReserve when TicketBroker deposit < minDeposit
+	defaultAutoDeposit := false
+	defaultAutoDepositMinDeposit := "100000000000000000" // 0.1 ETH
+	defaultAutoDepositGasReserve := "10000000000000000"  // 0.01 ETH
+	defaultAutoDepositInterval := 5 * time.Minute
+
 	return LivepeerConfig{
 		// Network & Addresses:
 		Network:      &defaultNetwork,
@@ -438,6 +450,12 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		KafkaUsername:         &defaultKafkaUsername,
 		KafkaPassword:         &defaultKafkaPassword,
 		KafkaGatewayTopic:     &defaultKafkaGatewayTopic,
+
+		// Auto-deposit
+		AutoDeposit:           &defaultAutoDeposit,
+		AutoDepositMinDeposit: &defaultAutoDepositMinDeposit,
+		AutoDepositGasReserve: &defaultAutoDepositGasReserve,
+		AutoDepositInterval:   &defaultAutoDepositInterval,
 	}
 }
 
@@ -1994,6 +2012,23 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	}
 
 	glog.Infof("Livepeer Node version: %v", core.LivepeerVersion)
+
+	// Start auto-deposit for gateway/broadcaster nodes
+	if *cfg.AutoDeposit && (n.NodeType == core.BroadcasterNode) && n.Eth != nil {
+		minDeposit, ok := new(big.Int).SetString(*cfg.AutoDepositMinDeposit, 10)
+		if !ok {
+			glog.Exitf("-autoDepositMinDeposit must be a valid integer, got %v", *cfg.AutoDepositMinDeposit)
+		}
+		gasReserve, ok := new(big.Int).SetString(*cfg.AutoDepositGasReserve, 10)
+		if !ok {
+			glog.Exitf("-autoDepositGasReserve must be a valid integer, got %v", *cfg.AutoDepositGasReserve)
+		}
+		go server.RunAutoDeposit(ctx, n.Eth, n.Eth.Backend(), server.AutoDepositConfig{
+			MinDeposit: minDeposit,
+			GasReserve: gasReserve,
+			Interval:   *cfg.AutoDepositInterval,
+		})
+	}
 
 	select {
 	case err := <-watcherErr:
