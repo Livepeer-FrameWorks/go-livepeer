@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   linux-build:
-    name: Build binaries for linux-${{ matrix.target.GOARCH }}
+    name: Build binaries for ${{ matrix.target.GOOS }}-${{ matrix.target.type }}-${{ matrix.target.GOARCH }}
     runs-on: ubuntu-24.04
     container:
       image: ${{ matrix.target.container }}
@@ -30,10 +30,27 @@ jobs:
           - GOOS: linux
             GOARCH: amd64
             container: ubuntu:22.04
+            type: cpu
 
           - GOOS: linux
             GOARCH: arm64
             container: ubuntu:20.04
+            type: cpu
+
+          - GOOS: linux
+            GOARCH: amd64
+            container: livepeerci/cuda:12.0.0-cudnn8-devel-ubuntu20.04
+            type: gpu
+
+          - GOOS: linux
+            GOARCH: arm64
+            container: livepeerci/cuda:12.0.0-cudnn8-devel-ubuntu20.04
+            type: gpu
+
+          - GOOS: windows
+            GOARCH: amd64
+            container: ubuntu:22.04
+            type: cpu
 
     steps:
       - name: Setup ubuntu container
@@ -41,12 +58,14 @@ jobs:
           apt update
           apt install -yqq build-essential make software-properties-common
           add-apt-repository -y ppa:git-core/candidate
-          apt update && apt install -yqq git zip unzip zlib1g-dev zlib1g libzlcore-dev yasm
+          apt update && apt install -yqq git zip unzip zlib1g-dev zlib1g libzlcore-dev yasm libva-dev
 
       - name: Check out code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # Check https://github.com/livepeer/go-livepeer/pull/1891
+          # for ref value discussion
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up go
@@ -67,6 +86,15 @@ jobs:
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           mkdir -p lp-builds/ releases/
 
+      - name: Set GPU build environment
+        if: matrix.target.type == 'gpu'
+        run: |
+          echo "CPATH=/usr/local/cuda_${{ matrix.target.GOARCH }}/include" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/local/cuda_${{ matrix.target.GOARCH }}/lib64" >> $GITHUB_ENV
+          echo "CGO_LDFLAGS=-L/usr/local/cuda_${{ matrix.target.GOARCH }}/lib64" >> $GITHUB_ENV
+          echo "RELEASE_TAG=gpu" >> $GITHUB_ENV
+          echo "LP_BUILD_DIR=livepeer-${{ matrix.target.GOOS }}-gpu-${{ matrix.target.GOARCH }}" >> $GITHUB_ENV
+
       - name: Install dependencies
         run: |
           apt update \
@@ -75,9 +103,12 @@ jobs:
             && add-apt-repository "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-14 main" \
             && apt update \
             && apt -yqq install \
-              nasm clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3 \
-              crossbuild-essential-arm64 \
+              nasm clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3 python3-pip \
+              cmake ninja-build \
+              gcc-mingw-w64 g++-mingw-w64-x86-64 libgcc-9-dev-arm64-cross libstdc++-9-dev-arm64-cross \
+              mingw-w64-tools gcc-mingw-w64-x86-64 mingw-w64-x86-64-dev \
               golang-goprotobuf-dev protobuf-compiler-grpc
+          pip3 install meson
 
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 30 \
             && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 30 \
@@ -92,6 +123,19 @@ jobs:
           GOARCH= GOOS= go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28.1
           GOARCH= GOOS= go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2.0
 
+      - name: Install zlib for windows
+        if: matrix.target.GOOS == 'windows'
+        env:
+          CC: x86_64-w64-mingw32-gcc
+        run: |
+          apt install -yqq wget
+          wget https://zlib.net/fossils/zlib-1.2.11.tar.gz
+          tar -xzf zlib-1.2.11.tar.gz
+          cd zlib-1.2.11
+          ./configure --prefix=/usr/x86_64-w64-mingw32 --static
+          make
+          make install
+
       - name: Install ffmpeg
         run: ./install_ffmpeg.sh
 
@@ -102,7 +146,16 @@ jobs:
           git config --global --add safe.directory '*'
           ./ci_env.sh make
 
+      - name: Archive binaries for windows
+        if: matrix.target.GOOS == 'windows'
+        run: |
+          mkdir -p "${GO_BUILD_DIR}/${LP_BUILD_DIR}/"
+          cd "$GO_BUILD_DIR/"
+          find . -type f -exec mv '{}' "$LP_BUILD_DIR/" \;
+          zip -9rq "../releases/$LP_BUILD_DIR.zip" ./
+
       - name: Archive binaries
+        if: matrix.target.GOOS != 'windows'
         run: |
           mkdir -p "${GO_BUILD_DIR}/${LP_BUILD_DIR}/"
           cd "$GO_BUILD_DIR/"
@@ -110,9 +163,9 @@ jobs:
           tar -czvf "../releases/$LP_BUILD_DIR.tar.gz" ./
 
       - name: Upload artifacts for cutting release
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
-          name: release-artifacts-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}
+          name: release-artifacts-${{ matrix.target.GOOS }}-${{ matrix.target.type }}-${{ matrix.target.GOARCH }}
           path: releases/
 
   macos-build:
@@ -123,6 +176,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # Check https://github.com/livepeer/go-livepeer/pull/1891
+          # for ref value discussion
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up go
@@ -151,9 +206,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install coreutils pkgconf nasm || true
+          brew install coreutils pkgconf nasm cmake meson ninja || true
 
       - name: Install go modules
+        # if: steps.go.outputs.cache-hit != 'true'
         run: go mod download
 
       - name: Install protoc plugins
