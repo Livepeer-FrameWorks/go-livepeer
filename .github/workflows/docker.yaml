@@ -16,119 +16,90 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docker:
-    name: Docker image generation
+  build-amd64:
+    name: Build Docker (amd64)
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       packages: write
       contents: read
-    runs-on: [self-hosted, linux, amd64]
+    runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          # Check https://github.com/livepeer/go-livepeer/pull/1891
-          # for ref value discussion
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Get build tags
         id: build-tag
-        run: |
-          ./ci_env.sh
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        run: ./ci_env.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            livepeer/go-livepeer
-            ghcr.io/${{ github.repository }}
+            livepeerframeworks/go-livepeer
+            ghcr.io/livepeer-frameworks/go-livepeer
           tags: |
             type=sha
             type=ref,event=pr
             type=ref,event=tag
-            type=sha,format=long
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{version}},prefix=v
-            type=semver,pattern={{major}}.{{minor}},prefix=v
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ github.event.pull_request.head.ref }}
-            type=raw,value=stable,enable=${{ startsWith(github.event.ref, 'refs/tags/v') && github.event.base_ref == 'refs/heads/master' }}
+          flavor: |
+            suffix=-amd64
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.CI_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.CI_DOCKERHUB_TOKEN }}
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push livepeer docker image
+      - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
           build-args: |
             BUILD_TAGS=${{ steps.build-tag.outputs.build-tags }}
           context: .
-          provenance: mode=max
-          sbom: true
-          # platforms: linux/amd64, linux/arm64 # NOTE: Arm64 not yet supported.
           platforms: linux/amd64
           push: true
           file: "docker/Dockerfile"
           tags: ${{ steps.meta.outputs.tags }}
-          annotations: ${{ steps.meta.outputs.annotations }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=livepeerci/build:cache
-          cache-to: type=registry,ref=livepeerci/build:cache,mode=max
+          cache-from: type=gha,scope=docker-amd64
+          cache-to: type=gha,scope=docker-amd64,mode=max,ignore-error=true
 
-  builder:
-    name: go-livepeer builder docker image generation
+
+  build-arm64:
+    name: Build Docker (arm64)
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       packages: write
       contents: read
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          # Check https://github.com/livepeer/go-livepeer/pull/1891
-          # for ref value discussion
           ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Cleanup hosted runner
-        run: |
-          sudo apt purge -yqq dotnet-* mono-* llvm-* libllvm* powershell* openjdk-* \
-          temurin-* mongodb-* firefox mysql-* \
-          google-chrome-stable libgl1-mesa-dri microsoft-edge-stable azure-cli
-          sudo apt autoremove -y
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android
-
-      - uses: actions-ecosystem/action-regex-match@v2
-        id: match-tag
-        with:
-          text: ${{ github.ref_name }}
-          regex: '^(main|master|v[0-9]+\.\d+\.\d+)$'
 
       - name: Get build tags
         id: build-tag
-        run: |
-          ./ci_env.sh
+        run: ./ci_env.sh
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -136,53 +107,112 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata (tags, labels) for builder image
-        id: meta-builder
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            livepeerci/build
-            ghcr.io/${{ github.repository }}/build
-          tags: |
-            type=sha
-            type=ref,event=pr
-            type=ref,event=tag
-            type=sha,format=long
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ github.event.pull_request.head.ref }}
-
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.CI_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.CI_DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and push livepeer builder
-        if: ${{ steps.match-tag.outputs.match != '' }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            livepeerframeworks/go-livepeer
+            ghcr.io/livepeer-frameworks/go-livepeer
+          tags: |
+            type=sha
+            type=ref,event=pr
+            type=ref,event=tag
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          flavor: |
+            suffix=-arm64
+
+      - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
           build-args: |
             BUILD_TAGS=${{ steps.build-tag.outputs.build-tags }}
           context: .
-          provenance: mode=max
-          sbom: true
-          # platforms: linux/amd64, linux/arm64 # NOTE: Arm64 not yet supported.
-          platforms: linux/amd64
+          platforms: linux/arm64
           push: true
           file: "docker/Dockerfile"
-          target: build
-          tags: ${{ steps.meta-builder.outputs.tags }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          labels: ${{ steps.meta-builder.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-arm64
+          cache-to: type=gha,scope=docker-arm64,mode=max,ignore-error=true
+
+  merge-manifest:
+    name: Merge multi-arch manifest
+    if: github.event_name == 'push'
+    needs: [build-amd64, build-arm64]
+    permissions:
+      packages: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            livepeerframeworks/go-livepeer
+            ghcr.io/livepeer-frameworks/go-livepeer
+          tags: |
+            type=sha
+            type=ref,event=tag
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          # For each tag, create a manifest combining amd64 and arm64
+          set -euo pipefail
+          echo "${{ steps.meta.outputs.tags }}" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Creating manifest for $tag"
+            docker buildx imagetools create -t "$tag" \
+              "${tag}-amd64" \
+              "${tag}-arm64"
+          done
+
+      - name: Save Docker metadata
+        run: |
+          GHCR_TAG=$(echo "${{ steps.meta.outputs.tags }}" | grep '^ghcr.io/' | head -1)
+          DOCKER_TAG="${GHCR_TAG##*:}"
+          DIGEST="sha256:$(docker buildx imagetools inspect "${GHCR_TAG}" --raw | sha256sum | cut -d' ' -f1)"
+          mkdir -p release-metadata
+          echo "${DOCKER_TAG}" > release-metadata/docker-tag.txt
+          echo "${DIGEST}" > release-metadata/docker-digest.txt
+          echo "Tag: ${DOCKER_TAG}, Digest: ${DIGEST}"
+
+      - name: Upload Docker metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-metadata
+          path: release-metadata/*.txt
