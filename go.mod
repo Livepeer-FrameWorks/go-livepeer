@@ -281,3 +281,5 @@ require (
 	lukechampine.com/blake3 v1.2.1 // indirect
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
+
+replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260310112411-158f43b2e803

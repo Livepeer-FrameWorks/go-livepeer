@@ -50,7 +50,8 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.CurrentManifest = fs.Bool("currentManifest", *cfg.CurrentManifest, "Expose the currently active ManifestID as \"/stream/current.m3u8\"")
 	cfg.Nvidia = fs.String("nvidia", *cfg.Nvidia, "Comma-separated list of Nvidia GPU device IDs (or \"all\" for all available devices)")
 	cfg.Netint = fs.String("netint", *cfg.Netint, "Comma-separated list of NetInt device GUIDs (or \"all\" for all available devices)")
-	cfg.TestTranscoder = fs.Bool("testTranscoder", *cfg.TestTranscoder, "Test Nvidia GPU transcoding at startup")
+	cfg.QSV = fs.String("qsv", *cfg.QSV, "Comma-separated list of Intel QSV device paths (or \"all\" for all available devices)")
+	cfg.TestTranscoder = fs.Bool("testTranscoder", *cfg.TestTranscoder, "Test hardware transcoding at startup")
 	cfg.HevcDecoding = fs.Bool("hevcDecoding", *cfg.HevcDecoding, "Enable or disable HEVC decoding")
 
 	// AI:

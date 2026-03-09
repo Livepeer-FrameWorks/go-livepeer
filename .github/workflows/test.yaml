@@ -84,7 +84,8 @@ jobs:
             && curl -fsSl https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add - \
             && sudo add-apt-repository "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-18 main" \
             && sudo apt update \
-            && sudo apt -yqq install clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3
+            && sudo apt -yqq install clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3 \
+              nasm cmake ninja-build meson
 
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 30 \
             && sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 30 \
