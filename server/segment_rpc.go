@@ -190,17 +190,6 @@ func (h *lphttp) ServeSegment(w http.ResponseWriter, r *http.Request) {
 			Url:    uri,
 			Pixels: res.TranscodeData.Segments[i].Pixels,
 		}
-		// Save perceptual hash if generated
-		if res.TranscodeData.Segments[i].PHash != nil {
-			pHashFile := name + ".phash"
-			pHashData := bytes.NewReader(res.TranscodeData.Segments[i].PHash)
-			pHashUri, err := res.OS.SaveData(ctx, pHashFile, pHashData, nil, 0)
-			if err != nil {
-				clog.Errorf(ctx, "Could not upload segment perceptual hash err=%q", err)
-				break
-			}
-			d.PerceptualHashUrl = pHashUri
-		}
 		segments = append(segments, d)
 	}
 
@@ -454,7 +443,7 @@ func verifySegCreds(ctx context.Context, orch Orchestrator, segCreds string, bro
 }
 
 func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters,
-	nonce uint64, calcPerceptualHash, verified bool) (*ReceivedTranscodeResult, error) {
+	nonce uint64, verified bool) (*ReceivedTranscodeResult, error) {
 
 	uploaded := seg.Name != "" // hijack seg.Name to convey the uploaded URI
 	if sess.OrchestratorInfo != nil {
@@ -464,7 +453,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		ctx = clog.AddVal(ctx, "orchestrator", sess.OrchestratorInfo.Transcoder)
 	}
 
-	segCreds, err := genSegCreds(sess, seg, segPar, calcPerceptualHash)
+	segCreds, err := genSegCreds(sess, seg, segPar)
 	if err != nil {
 		if monitor.Enabled {
 			monitor.SegmentUploadFailed(ctx, nonce, seg.SeqNo, monitor.SegmentUploadErrorGenCreds, err, false, sess.OrchestratorInfo.Transcoder)
@@ -680,7 +669,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	}, nil
 }
 
-func genSegCreds(sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters, calcPerceptualHash bool) (string, error) {
+func genSegCreds(sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters) (string, error) {
 
 	// Send credentials for our own storage
 	var storage *net.OSInfo
@@ -692,16 +681,15 @@ func genSegCreds(sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.Se
 	params := sess.Params
 	hash := crypto.Keccak256(seg.Data)
 	md := &core.SegTranscodingMetadata{
-		ManifestID:         params.ManifestID,
-		Seq:                int64(seg.SeqNo),
-		Hash:               ethcommon.BytesToHash(hash),
-		Profiles:           params.Profiles,
-		OS:                 storage,
-		Duration:           time.Duration(seg.Duration * float64(time.Second)),
-		Caps:               params.Capabilities,
-		AuthToken:          sess.OrchestratorInfo.GetAuthToken(),
-		CalcPerceptualHash: calcPerceptualHash,
-		SegmentParameters:  segPar,
+		ManifestID:        params.ManifestID,
+		Seq:               int64(seg.SeqNo),
+		Hash:              ethcommon.BytesToHash(hash),
+		Profiles:          params.Profiles,
+		OS:                storage,
+		Duration:          time.Duration(seg.Duration * float64(time.Second)),
+		Caps:              params.Capabilities,
+		AuthToken:         sess.OrchestratorInfo.GetAuthToken(),
+		SegmentParameters: segPar,
 	}
 	sig, err := sess.Broadcaster.Sign(md.Flatten())
 	if err != nil {

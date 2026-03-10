@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"math/rand"
 	"net/url"
 	"strconv"
 	"strings"
@@ -50,8 +49,8 @@ var MetadataPublishTimeout = 1 * time.Second
 var getOrchestratorInfoRPC = GetOrchestratorInfo
 var downloadSeg = core.DownloadData
 var submitMultiSession = func(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters,
-	nonce uint64, calcPerceptualHash bool, resc chan *SubmitResult) {
-	go submitSegment(ctx, sess, seg, segPar, nonce, calcPerceptualHash, resc)
+	nonce uint64, resc chan *SubmitResult) {
+	go submitSegment(ctx, sess, seg, segPar, nonce, resc)
 }
 var maxTranscodeAttempts = errors.New("hit max transcode attempts")
 
@@ -610,7 +609,7 @@ func (bs *BroadcastSession) popSegInFlight() (int, SegFlightMetadata) {
 }
 
 // selects number of sessions to use according to current algorithm
-func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*BroadcastSession, calcPerceptualHash bool, verified bool) {
+func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*BroadcastSession, verified bool) {
 	bsm.sessLock.Lock()
 	defer bsm.sessLock.Unlock()
 
@@ -638,7 +637,7 @@ func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*
 		}
 
 		// Return selected sessions
-		return sessions, true, verified
+		return sessions, verified
 	}
 
 	// Default to selecting from untrusted pool
@@ -647,7 +646,7 @@ func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*
 		sessions = bsm.trustedPool.selectSessions(ctx, 1)
 	}
 
-	return sessions, false, verified
+	return sessions, verified
 }
 
 func (bsm *BroadcastSessionsManager) cleanup(ctx context.Context) {
@@ -679,110 +678,6 @@ func (bsm *BroadcastSessionsManager) chooseResults(ctx context.Context, seg *str
 			return nil, nil, fmt.Errorf("error transcoding: no results at all err=%w", err)
 		}
 		return untrustedResults[0].Session, untrustedResults[0].TranscodeResult, untrustedResults[0].Err
-	}
-	if len(untrustedResults) == 0 {
-		// no results from untrusted orch, just using trusted ones
-		return trustedResult.Session, trustedResult.TranscodeResult, trustedResult.Err
-	}
-	segmcount := len(trustedResult.TranscodeResult.Segments)
-	if segmcount == 0 {
-		err = fmt.Errorf("error transcoding: no transcoded segments in the response from %s", trustedResult.Session.Transcoder())
-		return nil, nil, err
-	}
-	segmToCheckIndex := rand.Intn(segmcount)
-
-	// download trusted hashes
-	trustedHash, err := core.DownloadData(ctx, trustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl)
-	if err != nil {
-		err = fmt.Errorf("error downloading perceptual hash from url=%s err=%w",
-			trustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl, err)
-		return nil, nil, err
-	}
-	// download trusted video segment
-	trustedSegm, err := core.DownloadData(ctx, trustedResult.TranscodeResult.Segments[segmToCheckIndex].Url)
-	if err != nil {
-		err = fmt.Errorf("error downloading segment from url=%s err=%w",
-			trustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, err)
-		return nil, nil, err
-	}
-
-	// verify untrusted hashes
-	var sessionsToSuspend []*BroadcastSession
-	for _, untrustedResult := range untrustedResults {
-		ouri := untrustedResult.Session.Transcoder()
-		untrustedHash, err := core.DownloadData(ctx, untrustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl)
-		if err != nil {
-			err = fmt.Errorf("error uri=%s downloading perceptual hash from url=%s err=%w", ouri,
-				untrustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl, err)
-			return nil, nil, err
-		}
-		equal, err := ffmpeg.CompareSignatureByBuffer(trustedHash, untrustedHash)
-		if monitor.Enabled {
-			monitor.FastVerificationDone(ctx, ouri)
-			if !equal || err != nil {
-				monitor.FastVerificationFailed(ctx, ouri, monitor.FVType1Error)
-			}
-		}
-		if err != nil {
-			clog.Errorf(ctx, "error uri=%s comparing perceptual hashes from url=%s err=%q", ouri,
-				untrustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl, err)
-		}
-		clog.Infof(ctx, "Hashes from url=%s and url=%s are equal=%v saveenable=%v",
-			trustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl,
-			untrustedResult.TranscodeResult.Segments[segmToCheckIndex].PerceptualHashUrl, equal, drivers.FailSaveEnabled())
-		vequal := false
-		if equal {
-			// download untrusted video segment
-			untrustedSegm, err := core.DownloadData(ctx, untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url)
-			if err != nil {
-				err = fmt.Errorf("error uri=%s downloading segment from url=%s err=%w", ouri,
-					untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, err)
-				return nil, nil, err
-			}
-			vequal, err = ffmpeg.CompareVideoByBuffer(trustedSegm, untrustedSegm)
-			if err != nil {
-				clog.Errorf(ctx, "error uri=%s comparing video from url=%s err=%q", ouri,
-					untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, err)
-				if monitor.Enabled {
-					monitor.FastVerificationFailed(ctx, ouri, monitor.FVType2Error)
-				}
-				return nil, nil, err
-			}
-			if !vequal {
-				if monitor.Enabled {
-					monitor.FastVerificationFailed(ctx, ouri, monitor.FVType2Error)
-				}
-				if drivers.FailSaveEnabled() {
-					go func() {
-						drivers.SavePairData2GS(trustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, trustedSegm,
-							untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, untrustedSegm, "phase2.ts", seg.Data)
-					}()
-				}
-
-			}
-			clog.Infof(ctx, "Video comparison from url=%s and url=%s are equal=%v saveenable=%v",
-				trustedResult.TranscodeResult.Segments[segmToCheckIndex].Url,
-				untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, vequal, drivers.FailSaveEnabled())
-
-		} else if drivers.FailSaveEnabled() {
-			go func() {
-				drivers.SavePairData2GS(trustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, trustedHash,
-					untrustedResult.TranscodeResult.Segments[segmToCheckIndex].Url, untrustedHash, "phase1.hash", nil)
-			}()
-		}
-		if vequal && equal {
-			// stick to this verified orchestrator for further segments.
-			if untrustedResult.Err == nil {
-				bsm.sessionVerified(untrustedResult.Session)
-			}
-			// suspend sessions which returned incorrect results
-			for _, s := range sessionsToSuspend {
-				bsm.suspendAndRemoveOrch(s)
-			}
-			return untrustedResult.Session, untrustedResult.TranscodeResult, untrustedResult.Err
-		} else {
-			sessionsToSuspend = append(sessionsToSuspend, untrustedResult.Session)
-		}
 	}
 
 	return trustedResult.Session, trustedResult.TranscodeResult, trustedResult.Err
@@ -1144,7 +1039,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	}(time.Now())
 
 	nonce := cxn.nonce
-	sessions, calcPerceptualHash, verified := cxn.sessManager.selectSessions(ctx)
+	sessions, verified := cxn.sessManager.selectSessions(ctx)
 	// Return early under a few circumstances:
 	// View-only (non-transcoded) streams or no sessions available
 	if len(sessions) == 0 {
@@ -1174,7 +1069,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 		}
 		sess.pushSegInFlight(seg)
 		var res *ReceivedTranscodeResult
-		res, err = SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, calcPerceptualHash, verified)
+		res, err = SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, verified)
 		if err != nil || res == nil {
 			if isNonRetryableError(err) {
 				cxn.sessManager.completeSession(ctx, sess, false)
@@ -1185,21 +1080,6 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 				err = errors.New("empty response")
 			}
 			return nil, info, err
-		}
-		// Ensure perceptual hash is generated if we ask for it
-		if calcPerceptualHash {
-			segmcount := len(res.Segments)
-			if segmcount == 0 {
-				err = fmt.Errorf("error transcoding: no transcoded segments in the response from %s", sess.Transcoder())
-				return nil, info, err
-			}
-			segmToCheckIndex := rand.Intn(segmcount)
-			segHash, err := core.DownloadData(ctx, res.Segments[segmToCheckIndex].PerceptualHashUrl)
-			if err != nil || len(segHash) <= 0 {
-				err = fmt.Errorf("error downloading perceptual hash from url=%s err=%w",
-					res.Segments[segmToCheckIndex].PerceptualHashUrl, err)
-				return nil, info, err
-			}
 		}
 		urls, err = downloadResults(ctx, cxn, seg, sess, res, verifier)
 		return urls, info, err
@@ -1214,7 +1094,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 			}
 			// cxn.sessManager.pushSegInFlight(sess, seg)
 			sess.pushSegInFlight(seg2)
-			submitMultiSession(ctx, sess, seg2, segPar, nonce, calcPerceptualHash, resc)
+			submitMultiSession(ctx, sess, seg2, segPar, nonce, resc)
 			submittedCount++
 		}
 		if submittedCount == 0 {
@@ -1245,9 +1125,9 @@ type SubmitResult struct {
 }
 
 func submitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters,
-	nonce uint64, calcPerceptualHash bool, resc chan *SubmitResult) {
+	nonce uint64, resc chan *SubmitResult) {
 
-	res, err := SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, calcPerceptualHash, false)
+	res, err := SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, false)
 	resc <- &SubmitResult{
 		Session:         sess,
 		TranscodeResult: res,

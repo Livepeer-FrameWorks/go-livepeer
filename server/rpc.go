@@ -135,14 +135,13 @@ type BalanceUpdate struct {
 
 // BroadcastSession - session-specific state for broadcasters
 type BroadcastSession struct {
-	Broadcaster              common.Broadcaster
-	Params                   *core.StreamParameters
-	BroadcasterOS            drivers.OSSession
-	Sender                   pm.Sender
-	Balances                 *core.AddressBalances
-	OrchestratorScore        float32
-	VerifiedByPerceptualHash bool
-	lock                     *sync.RWMutex
+	Broadcaster       common.Broadcaster
+	Params            *core.StreamParameters
+	BroadcasterOS     drivers.OSSession
+	Sender            pm.Sender
+	Balances          *core.AddressBalances
+	OrchestratorScore float32
+	lock              *sync.RWMutex
 	// access these fields under the lock
 	SegsInFlight     []SegFlightMetadata
 	LatencyScore     float64
@@ -660,16 +659,15 @@ func coreSegMetadata(segData *net.SegData) (*core.SegTranscodingMetadata, error)
 	}
 
 	return &core.SegTranscodingMetadata{
-		ManifestID:         core.ManifestID(segData.ManifestId),
-		Seq:                segData.Seq,
-		Hash:               ethcommon.BytesToHash(segData.Hash),
-		Profiles:           profiles,
-		OS:                 os,
-		Duration:           dur,
-		Caps:               caps,
-		AuthToken:          segData.AuthToken,
-		CalcPerceptualHash: segData.CalcPerceptualHash,
-		SegmentParameters:  &segPar,
+		ManifestID:        core.ManifestID(segData.ManifestId),
+		Seq:               segData.Seq,
+		Hash:              ethcommon.BytesToHash(segData.Hash),
+		Profiles:          profiles,
+		OS:                os,
+		Duration:          dur,
+		Caps:              caps,
+		AuthToken:         segData.AuthToken,
+		SegmentParameters: &segPar,
 	}, nil
 }
 

@@ -511,21 +511,7 @@ func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts 
 			clog.Errorf(ctx, "Cannot read transcoded output for name=%s", oname)
 			return nil, err
 		}
-		// Extract perceptual hash if calculated
-		var s []byte = nil
-		if opts[i].CalcSign {
-			sigfile := oname + ".bin"
-			s, err = ioutil.ReadFile(sigfile)
-			if err != nil {
-				clog.Errorf(ctx, "Cannot read perceptual hash at name=%s", sigfile)
-				return nil, err
-			}
-			err = os.Remove(sigfile)
-			if err != nil {
-				clog.Errorf(ctx, "Cannot delete perceptual hash after reading name=%s", sigfile)
-			}
-		}
-		segments = append(segments, &TranscodedSegmentData{Data: o, Pixels: res.Encoded[i].Pixels, PHash: s})
+		segments = append(segments, &TranscodedSegmentData{Data: o, Pixels: res.Encoded[i].Pixels})
 		os.Remove(oname)
 	}
 
@@ -537,10 +523,9 @@ func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts 
 
 func profilesToTranscodeOptions(workDir string, accel ffmpeg.Acceleration, md *SegTranscodingMetadata) []ffmpeg.TranscodeOptions {
 	var (
-		profiles  []ffmpeg.VideoProfile = md.Profiles
-		calcPHash bool                  = md.CalcPerceptualHash
-		segPar    *SegmentParameters    = md.SegmentParameters
-		metadata  map[string]string     = md.Metadata
+		profiles []ffmpeg.VideoProfile = md.Profiles
+		segPar   *SegmentParameters    = md.SegmentParameters
+		metadata map[string]string     = md.Metadata
 	)
 
 	opts := make([]ffmpeg.TranscodeOptions, len(profiles))
@@ -550,7 +535,6 @@ func profilesToTranscodeOptions(workDir string, accel ffmpeg.Acceleration, md *S
 			Profile:      profiles[i],
 			Accel:        accel,
 			AudioEncoder: ffmpeg.ComponentOptions{Name: "copy"},
-			CalcSign:     calcPHash,
 			Metadata:     metadata,
 		}
 		if segPar != nil && segPar.Clip != nil {

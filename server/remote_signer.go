@@ -456,7 +456,7 @@ func (ls *LivepeerServer) GenerateLivePayment(w http.ResponseWriter, r *http.Req
 	}
 
 	// Generate segment credentials with an empty segment
-	segCreds, err := genSegCreds(sess, &stream.HLSSegment{}, nil, false)
+	segCreds, err := genSegCreds(sess, &stream.HLSSegment{}, nil)
 	if err != nil {
 		respondJsonError(ctx, w, err, http.StatusInternalServerError)
 		return

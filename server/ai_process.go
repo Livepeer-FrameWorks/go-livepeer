@@ -1628,7 +1628,7 @@ func errContainsMsg(err error, msgs ...string) bool {
 }
 func prepareAIPayment(ctx context.Context, sess *AISession, outPixels int64) (worker.RequestEditorFn, *BalanceUpdate, error) {
 	// genSegCreds expects a stream.HLSSegment so in order to reuse it here we pass a dummy object
-	segCreds, err := genSegCreds(sess.BroadcastSession, &stream.HLSSegment{}, nil, false)
+	segCreds, err := genSegCreds(sess.BroadcastSession, &stream.HLSSegment{}, nil)
 	if err != nil {
 		return nil, nil, err
 	}
