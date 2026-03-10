@@ -65,7 +65,7 @@ const (
 	Capability_GOP                        Capability = 11
 	Capability_AuthToken                  Capability = 12
 	Capability_SceneClassification        Capability = 13 // Deprecated, but can't remove because of Capability ordering
-	Capability_MPEG7VideoSignature        Capability = 14
+	Capability_MPEG7VideoSignature        Capability = 14 // Deprecated, but can't remove because of Capability ordering
 	Capability_HEVC_Decode                Capability = 15
 	Capability_HEVC_Encode                Capability = 16
 	Capability_VP8_Decode                 Capability = 17
@@ -109,7 +109,6 @@ var CapabilityNameLookup = map[Capability]string{
 	Capability_ProfileH264ConstrainedHigh: "H264 Constrained, Contained High profile",
 	Capability_GOP:                        "GOP",
 	Capability_AuthToken:                  "Auth token",
-	Capability_MPEG7VideoSignature:        "MPEG7 signature",
 	Capability_HEVC_Decode:                "HEVC decode",
 	Capability_HEVC_Encode:                "HEVC encode",
 	Capability_VP8_Decode:                 "VP8 decode",
@@ -212,7 +211,6 @@ func DefaultCapabilities() []Capability {
 		Capability_ProfileH264ConstrainedHigh,
 		Capability_GOP,
 		Capability_AuthToken,
-		Capability_MPEG7VideoSignature,
 		Capability_SegmentSlicing,
 	}
 }
@@ -365,9 +363,6 @@ func JobCapabilities(params *StreamParameters, segPar *SegmentParameters) (*Capa
 
 	// Define any default capabilities (especially ones that may be mandatory)
 	caps[Capability_AuthToken] = true
-	if params.VerificationFreq > 0 {
-		caps[Capability_MPEG7VideoSignature] = true
-	}
 	if segPar != nil {
 		caps[Capability_SegmentSlicing] = true
 	}

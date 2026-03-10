@@ -574,8 +574,7 @@ type TranscodeData struct {
 // TranscodedSegmentData contains encoded data for a profile
 type TranscodedSegmentData struct {
 	Data   []byte
-	PHash  []byte // Perceptual hash data (maybe nil)
-	Pixels int64  // Encoded pixels
+	Pixels int64 // Encoded pixels
 }
 
 type SegChanData struct {
@@ -773,11 +772,6 @@ func (n *LivepeerNode) transcodeSeg(ctx context.Context, config transcodeConfig,
 		if tSegments[i].Data == nil || len(tSegments[i].Data) < 25 {
 			clog.Errorf(ctx, "Cannot find transcoded segment for bytes=%d", len(tSegments[i].Data))
 			return terr(fmt.Errorf("ZeroSegments"))
-		}
-		if md.CalcPerceptualHash && tSegments[i].PHash == nil {
-			clog.Errorf(ctx, "Could not find perceptual hash for profile=%v", md.Profiles[i].Name)
-			// FIXME: Return the error once everyone has upgraded their nodes
-			// return terr(fmt.Errorf("MissingPerceptualHash"))
 		}
 		clog.V(common.DEBUG).Infof(ctx, "Transcoded segment profile=%s bytes=%d",
 			md.Profiles[i].Name, len(tSegments[i].Data))
