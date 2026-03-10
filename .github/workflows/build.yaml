@@ -29,34 +29,34 @@ jobs:
         target:
           - GOOS: linux
             GOARCH: amd64
-            container: ubuntu:22.04
+            container: ubuntu:24.04
             type: cpu
 
           - GOOS: linux
             GOARCH: arm64
-            container: ubuntu:20.04
+            container: ubuntu:24.04
             type: cpu
 
           - GOOS: linux
             GOARCH: amd64
-            container: livepeerci/cuda:12.0.0-cudnn8-devel-ubuntu20.04
+            container: livepeerci/cuda:12.8.1-cudnn-devel-ubuntu24.04
             type: gpu
 
           - GOOS: linux
             GOARCH: arm64
-            container: livepeerci/cuda:12.0.0-cudnn8-devel-ubuntu20.04
+            container: livepeerci/cuda:12.8.1-cudnn-devel-ubuntu24.04
             type: gpu
 
           - GOOS: windows
             GOARCH: amd64
-            container: ubuntu:22.04
+            container: ubuntu:24.04
             type: cpu
 
     steps:
       - name: Setup ubuntu container
         run: |
           apt update
-          apt install -yqq build-essential make software-properties-common
+          apt install -yqq build-essential make software-properties-common curl
           add-apt-repository -y ppa:git-core/candidate
           apt update && apt install -yqq git zip unzip zlib1g-dev zlib1g libzlcore-dev yasm libva-dev
 
@@ -81,7 +81,7 @@ jobs:
           echo "GOARCH=${{ matrix.target.GOARCH }}" >> $GITHUB_ENV
           echo "GOOS=${{ matrix.target.GOOS }}" >> $GITHUB_ENV
           echo "GO_BUILD_DIR=lp-builds/" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/github/home/compiled/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$HOME/compiled/lib/pkgconfig" >> $GITHUB_ENV
           echo "LP_BUILD_DIR=livepeer-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}" >> $GITHUB_ENV
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           mkdir -p lp-builds/ releases/
@@ -97,18 +97,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt update \
-            && apt install -yqq software-properties-common curl apt-transport-https lsb-release \
-            && curl -fsSl https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - \
-            && add-apt-repository "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-14 main" \
-            && apt update \
-            && apt -yqq install \
-              nasm clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3 python3-pip \
-              cmake ninja-build \
-              gcc-mingw-w64 g++-mingw-w64-x86-64 libgcc-9-dev-arm64-cross libstdc++-9-dev-arm64-cross \
-              mingw-w64-tools gcc-mingw-w64-x86-64 mingw-w64-x86-64-dev \
-              golang-goprotobuf-dev protobuf-compiler-grpc
-          pip3 install meson
+          apt update
+          apt -yqq install \
+            nasm clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python3 \
+            cmake ninja-build meson \
+            gcc-mingw-w64 g++-mingw-w64-x86-64 libgcc-14-dev-arm64-cross libstdc++-14-dev-arm64-cross \
+            mingw-w64-tools gcc-mingw-w64-x86-64 mingw-w64-x86-64-dev \
+            golang-goprotobuf-dev protobuf-compiler-grpc
 
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 30 \
             && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 30 \
@@ -129,9 +124,9 @@ jobs:
           CC: x86_64-w64-mingw32-gcc
         run: |
           apt install -yqq wget
-          wget https://zlib.net/fossils/zlib-1.2.11.tar.gz
-          tar -xzf zlib-1.2.11.tar.gz
-          cd zlib-1.2.11
+          wget https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          tar -xzf zlib-1.3.1.tar.gz
+          cd zlib-1.3.1
           ./configure --prefix=/usr/x86_64-w64-mingw32 --static
           make
           make install
@@ -206,6 +201,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          echo "$(brew --prefix)/bin" >> $GITHUB_PATH
           brew install coreutils pkgconf nasm cmake meson ninja || true
 
       - name: Install go modules
