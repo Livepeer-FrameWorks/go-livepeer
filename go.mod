@@ -282,4 +282,4 @@ require (
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
-replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260310112411-158f43b2e803
+replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260310124829-4716251a7a45

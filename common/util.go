@@ -456,6 +456,10 @@ func ParseAccelDevices(devices string, acceleration ffmpeg.Acceleration) ([]stri
 	if acceleration == ffmpeg.QSV && devices == "all" {
 		return detectQSVDevices()
 	}
+	if acceleration == ffmpeg.Videotoolbox {
+		// VideoToolbox has no device paths — always route through platform detection
+		return detectVideotoolboxDevices()
+	}
 	return strings.Split(devices, ","), nil
 }
 
