@@ -119,6 +119,7 @@ type LivepeerConfig struct {
 	Nvidia                     *string
 	Netint                     *string
 	QSV                        *string
+	Videotoolbox               *string
 	HevcDecoding               *bool
 	TestTranscoder             *bool
 	GatewayHost                *string
@@ -234,6 +235,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultNvidia := ""
 	defaultNetint := ""
 	defaultQSV := ""
+	defaultVideotoolbox := ""
 	defaultHevcDecoding := false
 	defaultTestTranscoder := true
 
@@ -363,6 +365,7 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		Nvidia:               &defaultNvidia,
 		Netint:               &defaultNetint,
 		QSV:                  &defaultQSV,
+		Videotoolbox:         &defaultVideotoolbox,
 		HevcDecoding:         &defaultHevcDecoding,
 		TestTranscoder:       &defaultTestTranscoder,
 
@@ -520,8 +523,11 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	if *cfg.QSV != "" {
 		hwAccelCount++
 	}
+	if *cfg.Videotoolbox != "" {
+		hwAccelCount++
+	}
 	if hwAccelCount > 1 {
-		glog.Exit("only one hardware acceleration flag (-nvidia, -netint, -qsv) can be specified at a time")
+		glog.Exit("only one hardware acceleration flag (-nvidia, -netint, -qsv, -videotoolbox) can be specified at a time")
 	}
 
 	// Identify this instance using service address (preferred) or Ethereum address if available.
@@ -670,6 +676,10 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		if *cfg.QSV != "" {
 			accel = ffmpeg.QSV
 			devicesStr = *cfg.QSV
+		}
+		if *cfg.Videotoolbox != "" {
+			accel = ffmpeg.Videotoolbox
+			devicesStr = *cfg.Videotoolbox
 		}
 		if accel != ffmpeg.Software {
 			accelName := ffmpeg.AccelerationNameLookup[accel]

@@ -96,6 +96,11 @@ type QSVTranscoder struct {
 	session *ffmpeg.Transcoder
 }
 
+type VideotoolboxTranscoder struct {
+	device  string
+	session *ffmpeg.Transcoder
+}
+
 func (nv *NetintTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (td *TranscodeData, retErr error) {
 	// Returns UnrecoverableError instead of panicking to gracefully notify orchestrator about transcoder's failure
 	defer recoverFromPanic(&retErr)
@@ -210,6 +215,41 @@ func (q *QSVTranscoder) EndTranscodingSession(sessionId string) {
 
 func (q *QSVTranscoder) Stop() {
 	q.session.StopTranscoder()
+}
+
+func (vt *VideotoolboxTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (td *TranscodeData, retErr error) {
+	defer recoverFromPanic(&retErr)
+
+	in := &ffmpeg.TranscodeOptionsIn{
+		Fname:   md.Fname,
+		Accel:   ffmpeg.Videotoolbox,
+		Device:  vt.device,
+		Profile: md.ProfileIn,
+	}
+	profiles := md.Profiles
+	out := profilesToTranscodeOptions(WorkDir, ffmpeg.Videotoolbox, md)
+
+	_, seqNo, parseErr := parseURI(md.Fname)
+	start := time.Now()
+
+	res, err := vt.session.Transcode(in, out)
+	if err != nil {
+		return nil, err
+	}
+
+	if monitor.Enabled && parseErr == nil {
+		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
+	}
+
+	return resToTranscodeData(ctx, res, out)
+}
+
+func (vt *VideotoolboxTranscoder) EndTranscodingSession(sessionId string) {
+	vt.Stop()
+}
+
+func (vt *VideotoolboxTranscoder) Stop() {
+	vt.session.StopTranscoder()
 }
 
 type transcodeTestParams struct {
@@ -401,6 +441,8 @@ func GetTranscoderFactoryByAccel(acceleration ffmpeg.Acceleration) (func(device 
 		return NewNetintTranscoder, nil
 	case ffmpeg.QSV:
 		return NewQSVTranscoder, nil
+	case ffmpeg.Videotoolbox:
+		return NewVideotoolboxTranscoder, nil
 	default:
 		return nil, ffmpeg.ErrTranscoderHw
 	}
@@ -422,6 +464,13 @@ func NewNetintTranscoder(gpu string) TranscoderSession {
 
 func NewQSVTranscoder(device string) TranscoderSession {
 	return &QSVTranscoder{
+		device:  device,
+		session: ffmpeg.NewTranscoder(),
+	}
+}
+
+func NewVideotoolboxTranscoder(device string) TranscoderSession {
+	return &VideotoolboxTranscoder{
 		device:  device,
 		session: ffmpeg.NewTranscoder(),
 	}

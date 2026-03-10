@@ -51,6 +51,7 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.Nvidia = fs.String("nvidia", *cfg.Nvidia, "Comma-separated list of Nvidia GPU device IDs (or \"all\" for all available devices)")
 	cfg.Netint = fs.String("netint", *cfg.Netint, "Comma-separated list of NetInt device GUIDs (or \"all\" for all available devices)")
 	cfg.QSV = fs.String("qsv", *cfg.QSV, "Comma-separated list of Intel QSV device paths (or \"all\" for all available devices)")
+	cfg.Videotoolbox = fs.String("videotoolbox", *cfg.Videotoolbox, "Enable Apple VideoToolbox hardware acceleration (use \"all\" on macOS)")
 	cfg.TestTranscoder = fs.Bool("testTranscoder", *cfg.TestTranscoder, "Test hardware transcoding at startup")
 	cfg.HevcDecoding = fs.Bool("hevcDecoding", *cfg.HevcDecoding, "Enable or disable HEVC decoding")
 
