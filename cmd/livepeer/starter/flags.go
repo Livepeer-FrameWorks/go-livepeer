@@ -54,6 +54,9 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.Videotoolbox = fs.String("videotoolbox", *cfg.Videotoolbox, "Enable Apple VideoToolbox hardware acceleration (use \"all\" on macOS)")
 	cfg.TestTranscoder = fs.Bool("testTranscoder", *cfg.TestTranscoder, "Test hardware transcoding at startup")
 	cfg.HevcDecoding = fs.Bool("hevcDecoding", *cfg.HevcDecoding, "Enable or disable HEVC decoding")
+	cfg.CapacityMode = fs.String("capacityMode", *cfg.CapacityMode, "Capacity management mode: 'dynamic' (default, hardware-aware) or 'static' (uses -maxSessions only)")
+	cfg.CapacityAcceptThreshold = fs.Float64("capacityAcceptThreshold", *cfg.CapacityAcceptThreshold, "Dynamic capacity: accept new sessions below this utilization (0.0-1.0, default 0.70)")
+	cfg.CapacityRejectThreshold = fs.Float64("capacityRejectThreshold", *cfg.CapacityRejectThreshold, "Dynamic capacity: reject new sessions above this utilization (0.0-1.0, default 0.80)")
 
 	// AI:
 	cfg.AIServiceRegistry = fs.Bool("aiServiceRegistry", *cfg.AIServiceRegistry, "Set to true to use an AI ServiceRegistry contract address")

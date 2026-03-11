@@ -166,6 +166,15 @@ func runTranscode(n *core.LivepeerNode, orchAddr string, httpc *http.Client, not
 		sendTranscodeResult(ctx, n, orchAddr, httpc, notify, contentType, &body, tData, errCapabilities)
 		return
 	}
+	// Check local capacity before accepting work
+	if n.CapacityMgr != nil {
+		if capErr := n.CapacityMgr.CheckCapacity(); capErr != nil {
+			clog.Warningf(ctx, "Transcoder overloaded, rejecting taskId=%d", notify.TaskId)
+			sendTranscodeResult(ctx, n, orchAddr, httpc, notify,
+				transcodingErrorMimeType, &body, tData, core.ErrTranscoderCapacity)
+			return
+		}
+	}
 	data, err := core.DownloadData(ctx, notify.Url)
 	if err != nil {
 		clog.Errorf(ctx, "Transcoder cannot get segment from taskId=%d url=%s err=%q", notify.TaskId, notify.Url, err)
@@ -194,7 +203,12 @@ func runTranscode(n *core.LivepeerNode, orchAddr string, httpc *http.Client, not
 
 	start := time.Now()
 	tData, err = n.Transcoder.Transcode(ctx, md)
-	clog.V(common.VERBOSE).InfofErr(ctx, "Transcoding done for taskId=%d url=%s dur=%v", notify.TaskId, notify.Url, time.Since(start), err)
+	took := time.Since(start)
+	clog.V(common.VERBOSE).InfofErr(ctx, "Transcoding done for taskId=%d url=%s dur=%v", notify.TaskId, notify.Url, took, err)
+	// Update local capacity tracking on transcoder side
+	if n.CapacityMgr != nil && err == nil && tData != nil {
+		n.CapacityMgr.RecordResult(tData.DeviceID, took, md.Duration)
+	}
 	if err != nil {
 		if _, ok := err.(core.UnrecoverableError); ok {
 			defer panic(err)
@@ -271,6 +285,10 @@ func sendTranscodeResult(ctx context.Context, n *core.LivepeerNode, orchAddr str
 		pixels = tData.Pixels
 	}
 	req.Header.Set("Pixels", strconv.FormatInt(pixels, 10))
+	// Report capacity utilization to orchestrator (follows existing Pixels/TaskId header pattern)
+	if n.CapacityMgr != nil {
+		req.Header.Set("Utilization", strconv.FormatFloat(n.CapacityMgr.Utilization(), 'f', 6, 64))
+	}
 	uploadStart := time.Now()
 	resp, err := httpc.Do(req)
 	if err != nil {
@@ -351,6 +369,12 @@ func (h *lphttp) TranscodeResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var res core.RemoteTranscoderResult
+	// Parse reported utilization from remote transcoder
+	if utilStr := r.Header.Get("Utilization"); utilStr != "" {
+		if util, err := strconv.ParseFloat(utilStr, 64); err == nil {
+			res.Utilization = &util
+		}
+	}
 	if transcodingErrorMimeType == mediaType {
 		w.Write([]byte("OK"))
 		body, err := ioutil.ReadAll(r.Body)

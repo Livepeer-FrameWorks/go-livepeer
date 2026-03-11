@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"math/big"
 	"net/url"
 	"os"
 	"path"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +85,12 @@ func (orch *orchestrator) CheckCapacity(mid ManifestID) error {
 	defer orch.node.segmentMutex.RUnlock()
 	if _, ok := orch.node.SegmentChans[mid]; ok {
 		return nil
+	}
+	// Dynamic capacity check (if enabled) runs before static MaxSessions backstop
+	if orch.node.CapacityMgr != nil {
+		if err := orch.node.CapacityMgr.CheckCapacity(); err != nil {
+			return err
+		}
 	}
 	if len(orch.node.SegmentChans) >= MaxSessions {
 		return ErrOrchCap
@@ -568,7 +576,8 @@ type TranscodeResult struct {
 // TranscodeData contains the transcoding output for an input segment
 type TranscodeData struct {
 	Segments []*TranscodedSegmentData
-	Pixels   int64 // Decoded pixels
+	Pixels   int64  // Decoded pixels
+	DeviceID string // Which device performed this transcode (for capacity tracking)
 }
 
 // TranscodedSegmentData contains encoded data for a profile
@@ -587,6 +596,7 @@ type SegChanData struct {
 type RemoteTranscoderResult struct {
 	TranscodeData *TranscodeData
 	Err           error
+	Utilization   *float64 // reported by remote transcoder (0.0-1.0), nil if not reported
 }
 
 type SegmentChan chan *SegChanData
@@ -764,6 +774,11 @@ func (n *LivepeerNode) transcodeSeg(ctx context.Context, config transcodeConfig,
 		lpmon.SegmentTranscoded(ctx, 0, seg.SeqNo, md.Duration, took, common.ProfilesNames(md.Profiles), true, true)
 	}
 
+	// Record result for dynamic capacity management
+	if n.CapacityMgr != nil {
+		n.CapacityMgr.RecordResult(tData.DeviceID, took, md.Duration)
+	}
+
 	// Prepare the result object
 	var tr TranscodeResult
 	segHashes := make([][]byte, len(tSegments))
@@ -927,13 +942,15 @@ func (rtm *RemoteTranscoderManager) transcoderResults(tcID int64, res *RemoteTra
 }
 
 type RemoteTranscoder struct {
-	manager      *RemoteTranscoderManager
-	stream       net.Transcoder_RegisterTranscoderServer
-	capabilities *Capabilities
-	eof          chan struct{}
-	addr         string
-	capacity     int
-	load         int
+	manager        *RemoteTranscoderManager
+	stream         net.Transcoder_RegisterTranscoderServer
+	capabilities   *Capabilities
+	eof            chan struct{}
+	addr           string
+	capacity       int
+	load           int
+	utilization    float64   // reported by remote transcoder (0.0-1.0)
+	lastUtilUpdate time.Time // when utilization was last reported
 }
 
 // RemoteTranscoderFatalError wraps error to indicate that error is fatal
@@ -950,6 +967,7 @@ func NewRemoteTranscoderFatalError(err error) error {
 var ErrRemoteTranscoderTimeout = errors.New("Remote transcoder took too long")
 var ErrNoTranscodersAvailable = errors.New("no transcoders available")
 var ErrNoCompatibleTranscodersAvailable = errors.New("no transcoders can provide requested capabilities")
+var ErrTranscoderCapacity = errors.New("transcoder capacity exceeded")
 
 func (rt *RemoteTranscoder) done() {
 	// select so we don't block indefinitely if there's no listener
@@ -1009,6 +1027,18 @@ func (rt *RemoteTranscoder) Transcode(logCtx context.Context, md *SegTranscoding
 			rt.addr, taskID, fname, time.Since(start))
 		return signalEOF(ErrRemoteTranscoderTimeout)
 	case chanData := <-taskChan:
+		// Update utilization from remote transcoder report
+		if chanData.Utilization != nil {
+			rt.manager.RTmutex.Lock()
+			rt.utilization = *chanData.Utilization
+			rt.lastUtilUpdate = time.Now()
+			sort.Sort(byLoadFactor(rt.manager.remoteTranscoders))
+			rt.manager.RTmutex.Unlock()
+		}
+		// Override DeviceID with transcoder address (local device ID is meaningless to orch)
+		if chanData.TranscodeData != nil {
+			chanData.TranscodeData.DeviceID = rt.addr
+		}
 		segmentLen := 0
 		if chanData.TranscodeData != nil {
 			segmentLen = len(chanData.TranscodeData.Segments)
@@ -1044,8 +1074,15 @@ func NewRemoteTranscoderManager() *RemoteTranscoderManager {
 
 type byLoadFactor []*RemoteTranscoder
 
+const utilizationStaleness = 30 * time.Second
+
 func loadFactor(r *RemoteTranscoder) float64 {
-	return float64(r.load) / float64(r.capacity)
+	staticLoad := float64(r.load) / float64(r.capacity)
+	// Use reported utilization if fresh (not stale from idle period)
+	if time.Since(r.lastUtilUpdate) < utilizationStaleness {
+		return math.Max(staticLoad, r.utilization)
+	}
+	return staticLoad
 }
 
 func (r byLoadFactor) Len() int      { return len(r) }
@@ -1184,6 +1221,11 @@ func (rtm *RemoteTranscoderManager) selectTranscoder(sessionId string, caps *Cap
 				// Head of queue is at capacity, so the rest must be too. Exit early
 				return nil, ErrNoTranscodersAvailable
 			}
+			// Reject if even the least-loaded transcoder reports fresh high utilization
+			if currentTranscoder.utilization > DefaultRejectThreshold &&
+				time.Since(currentTranscoder.lastUtilUpdate) < utilizationStaleness {
+				return nil, ErrNoTranscodersAvailable
+			}
 
 			// Assigning transcoder to session for future use
 			rtm.streamSessions[sessionId] = currentTranscoder
@@ -1239,6 +1281,17 @@ func (rtm *RemoteTranscoderManager) Transcode(ctx context.Context, md *SegTransc
 		rtm.completeStreamSession(md.AuthToken.SessionId)
 		rtm.RTmutex.Unlock()
 	}
+	// Capacity exceeded: mark transcoder overloaded and try another (non-fatal, don't kill connection)
+	if err != nil && strings.Contains(err.Error(), ErrTranscoderCapacity.Error()) {
+		glog.Infof("Transcoder %s at capacity, trying another", currentTranscoder.addr)
+		rtm.RTmutex.Lock()
+		currentTranscoder.utilization = 1.0
+		currentTranscoder.lastUtilUpdate = time.Now()
+		sort.Sort(byLoadFactor(rtm.remoteTranscoders))
+		rtm.RTmutex.Unlock()
+		return rtm.Transcode(ctx, md)
+	}
+
 	_, fatal := err.(RemoteTranscoderFatalError)
 	if fatal {
 		// Don't retry if we've timed out; broadcaster likely to have moved on

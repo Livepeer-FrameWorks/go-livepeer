@@ -232,6 +232,14 @@ type (
 		mAIWhipTransportBytesReceived *stats.Int64Measure
 		mAIWhipTransportBytesSent     *stats.Int64Measure
 
+		// Metrics for dynamic capacity management
+		mCapacityUtilization *stats.Float64Measure
+		mCapacityRealtimeEMA *stats.Float64Measure
+		mCapacityHWEncoder   *stats.Float64Measure
+		mCapacityHWDecoder   *stats.Float64Measure
+		mCapacityAccepted    *stats.Int64Measure
+		mCapacityRejected    *stats.Int64Measure
+
 		lock        sync.Mutex
 		emergeTimes map[uint64]map[uint64]time.Time // nonce:seqNo
 		success     map[uint64]*segmentsAverager
@@ -415,6 +423,14 @@ func InitCensus(nodeType NodeType, version string) {
 
 	census.mAIWhipTransportBytesReceived = stats.Int64("ai_whip_transport_bytes_received", "Number of bytes received on a WHIP connection", "byte")
 	census.mAIWhipTransportBytesSent = stats.Int64("ai_whip_transport_bytes_sent", "Number of bytes sent on a WHIP connection", "byte")
+
+	// Dynamic capacity management metrics
+	census.mCapacityUtilization = stats.Float64("capacity_utilization", "Blended utilization of least-loaded device", "rat")
+	census.mCapacityRealtimeEMA = stats.Float64("capacity_realtime_ema", "EMA of transcode duration / segment duration", "rat")
+	census.mCapacityHWEncoder = stats.Float64("capacity_hw_encoder_util", "Hardware encoder utilization", "rat")
+	census.mCapacityHWDecoder = stats.Float64("capacity_hw_decoder_util", "Hardware decoder utilization", "rat")
+	census.mCapacityAccepted = stats.Int64("capacity_accepted_total", "Sessions accepted by dynamic capacity", "tot")
+	census.mCapacityRejected = stats.Int64("capacity_rejected_total", "Sessions rejected by dynamic capacity", "tot")
 
 	glog.Infof("Compiler: %s Arch %s OS %s Go version %s", runtime.Compiler, runtime.GOARCH, runtime.GOOS, runtime.Version())
 	glog.Infof("Livepeer version: %s", version)
@@ -1092,6 +1108,49 @@ func InitCensus(nodeType NodeType, version string) {
 			TagKeys:     baseTags,
 			Aggregation: view.LastValue(),
 		},
+		// Dynamic capacity management views
+		{
+			Name:        "capacity_utilization",
+			Measure:     census.mCapacityUtilization,
+			Description: "Blended utilization of least-loaded device (0-1)",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "capacity_realtime_ema",
+			Measure:     census.mCapacityRealtimeEMA,
+			Description: "EMA of transcode duration / segment duration",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "capacity_hw_encoder_util",
+			Measure:     census.mCapacityHWEncoder,
+			Description: "Hardware encoder utilization (0-1)",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "capacity_hw_decoder_util",
+			Measure:     census.mCapacityHWDecoder,
+			Description: "Hardware decoder utilization (0-1)",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "capacity_accepted_total",
+			Measure:     census.mCapacityAccepted,
+			Description: "Sessions accepted by dynamic capacity management",
+			TagKeys:     baseTags,
+			Aggregation: view.Sum(),
+		},
+		{
+			Name:        "capacity_rejected_total",
+			Measure:     census.mCapacityRejected,
+			Description: "Sessions rejected by dynamic capacity management",
+			TagKeys:     baseTags,
+			Aggregation: view.Sum(),
+		},
 		{
 			Name:        "ai_orchestrators_available_total",
 			Measure:     census.mAINumOrchs,
@@ -1376,6 +1435,30 @@ func (cen *censusMetricsCounter) timeoutWatcher(ctx context.Context) {
 
 func MaxSessions(maxSessions int) {
 	stats.Record(census.ctx, census.mMaxSessions.M(int64(maxSessions)))
+}
+
+func CapacityUtilization(util float64) {
+	stats.Record(census.ctx, census.mCapacityUtilization.M(util))
+}
+
+func CapacityRealtimeEMA(ema float64) {
+	stats.Record(census.ctx, census.mCapacityRealtimeEMA.M(ema))
+}
+
+func CapacityHWEncoder(util float64) {
+	stats.Record(census.ctx, census.mCapacityHWEncoder.M(util))
+}
+
+func CapacityHWDecoder(util float64) {
+	stats.Record(census.ctx, census.mCapacityHWDecoder.M(util))
+}
+
+func CapacityAccepted() {
+	stats.Record(census.ctx, census.mCapacityAccepted.M(1))
+}
+
+func CapacityRejected() {
+	stats.Record(census.ctx, census.mCapacityRejected.M(1))
 }
 
 func OrchestratorSwapped(ctx context.Context) {
