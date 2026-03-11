@@ -146,7 +146,7 @@ func TestCapability_TranscoderCapabilities(t *testing.T) {
 	devices, err := common.ParseAccelDevices("all", ffmpeg.Nvidia)
 	devicesAvailable := err == nil && len(devices) > 0
 	if devicesAvailable {
-		nvidiaCaps, err := TestTranscoderCapabilities(devices, NewNvidiaTranscoder)
+		nvidiaCaps, _, err := TestTranscoderCapabilities(devices, NewNvidiaTranscoder)
 		assert.Nil(t, err)
 		assert.False(t, HasCapability(nvidiaCaps, Capability_H264_Decode_444_8bit), "Nvidia device should not support decode of 444_8bit")
 		assert.False(t, HasCapability(nvidiaCaps, Capability_H264_Decode_422_8bit), "Nvidia device should not support decode of 422_8bit")

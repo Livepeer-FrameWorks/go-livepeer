@@ -30,7 +30,8 @@ type LoadBalancingTranscoder struct {
 	mu       *sync.RWMutex
 	load     map[string]int
 	sessions map[string]*transcoderSession
-	idx      int // Ensures a non-tapered work distribution
+	idx      int              // Ensures a non-tapered work distribution
+	capMgr   *CapacityManager // optional, for utilization-aware GPU balancing
 }
 
 func (lb *LoadBalancingTranscoder) EndTranscodingSession(sessionId string) {
@@ -55,6 +56,13 @@ func NewLoadBalancingTranscoder(devices []string, newTranscoderFn newTranscoderF
 		load:        make(map[string]int),
 		sessions:    make(map[string]*transcoderSession),
 	}
+}
+
+// SetCapacityManager enables utilization-aware GPU selection in leastLoaded().
+func (lb *LoadBalancingTranscoder) SetCapacityManager(cm *CapacityManager) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.capMgr = cm
 }
 
 func (lb *LoadBalancingTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadata) (*TranscodeData, error) {
@@ -134,12 +142,27 @@ func (lb *LoadBalancingTranscoder) createSession(ctx context.Context, md *SegTra
 
 // Find the lowest loaded transcoder.
 // Expects the mutex `lb.mu` to be locked by the caller.
+// When a CapacityManager is available, actual GPU utilization (EMA + HW counters)
+// inflates the cost of struggling GPUs, steering new sessions to healthier ones.
+// This handles decode cost, codec complexity, and uneven GPU hardware automatically.
 func (lb *LoadBalancingTranscoder) leastLoaded() string {
-	min, idx := math.MaxInt64, 0
+	minScore, idx := float64(math.MaxInt64), 0
 	for i := 0; i < len(lb.transcoders); i++ {
 		k := (i + lb.idx) % len(lb.transcoders)
-		if lb.load[lb.transcoders[k]] < min {
-			min = lb.load[lb.transcoders[k]]
+		dev := lb.transcoders[k]
+		score := float64(lb.load[dev])
+		// Inflate cost by actual GPU burden if utilization data is available.
+		// Multiplicative: amplify cost differences by GPU burden.
+		// Additive: penalty ensures hot GPUs are avoided even with zero tracked load.
+		// At util=0 (cold start), score is unchanged — pure cost estimate.
+		if lb.capMgr != nil {
+			util := lb.capMgr.DeviceUtilization(dev)
+			if util > 0 {
+				score = score*(1.0+util*2.0) + util*1e8
+			}
+		}
+		if score < minScore {
+			minScore = score
 			idx = k
 		}
 	}

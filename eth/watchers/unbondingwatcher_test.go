@@ -24,7 +24,7 @@ func TestUnbondingWatcherLoop(t *testing.T) {
 
 	go watcher.Watch()
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	createBlockEvent := func(eventType blockwatch.EventType, blkNum uint64, logs []types.Log) *blockwatch.Event {
 		for i := 0; i < len(logs); i++ {
@@ -45,7 +45,7 @@ func TestUnbondingWatcherLoop(t *testing.T) {
 
 	bw.sink <- addedBlockEvents
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	lock := store.Get(1)
 	amount, _ := new(big.Int).SetString("11111000000000000000", 10)
@@ -58,13 +58,13 @@ func TestUnbondingWatcherLoop(t *testing.T) {
 
 	bw.sink <- removedBlockEvents
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	assert.Nil(store.Get(1))
 
 	watcher.Stop()
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	assert.True(bw.sub.unsubscribed)
 }

@@ -145,6 +145,7 @@ type LivepeerNode struct {
 	ExternalCapabilities *ExternalCapabilities
 	AutoAdjustPrice      bool
 	AutoSessionLimit     bool
+	CapacityMgr          *CapacityManager
 
 	TrickleInsecureSkipVerify bool
 

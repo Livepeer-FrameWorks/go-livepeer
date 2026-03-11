@@ -70,7 +70,7 @@ func (lt *LocalTranscoder) Transcode(ctx context.Context, md *SegTranscodingMeta
 		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
 	}
 
-	return resToTranscodeData(ctx, res, opts)
+	return resToTranscodeData(ctx, res, opts, "cpu")
 }
 
 func (lt *LocalTranscoder) EndTranscodingSession(sessionId string) {
@@ -129,7 +129,7 @@ func (nv *NetintTranscoder) Transcode(ctx context.Context, md *SegTranscodingMet
 		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
 	}
 
-	return resToTranscodeData(ctx, res, out)
+	return resToTranscodeData(ctx, res, out, nv.device)
 }
 
 func (lt *LocalTranscoder) Stop() {
@@ -171,7 +171,7 @@ func (nv *NvidiaTranscoder) Transcode(ctx context.Context, md *SegTranscodingMet
 		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
 	}
 
-	return resToTranscodeData(ctx, res, out)
+	return resToTranscodeData(ctx, res, out, nv.device)
 }
 
 func (nv *NvidiaTranscoder) EndTranscodingSession(sessionId string) {
@@ -206,7 +206,7 @@ func (q *QSVTranscoder) Transcode(ctx context.Context, md *SegTranscodingMetadat
 		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
 	}
 
-	return resToTranscodeData(ctx, res, out)
+	return resToTranscodeData(ctx, res, out, q.device)
 }
 
 func (q *QSVTranscoder) EndTranscodingSession(sessionId string) {
@@ -241,7 +241,7 @@ func (vt *VideotoolboxTranscoder) Transcode(ctx context.Context, md *SegTranscod
 		monitor.SegmentTranscoded(ctx, 0, seqNo, md.Duration, time.Since(start), common.ProfilesNames(profiles), true, true)
 	}
 
-	return resToTranscodeData(ctx, res, out)
+	return resToTranscodeData(ctx, res, out, vt.device)
 }
 
 func (vt *VideotoolboxTranscoder) EndTranscodingSession(sessionId string) {
@@ -313,25 +313,36 @@ func transcodeWithSample(handler func(*transcodeTestParams) continueLoop) {
 	}
 }
 
-func testAccelTranscode(device string, tf func(device string) TranscoderSession, fname string, profile ffmpeg.VideoProfile, renditionCount int) (outputProduced, outputValid bool, err error) {
+func testAccelTranscode(device string, tf func(device string) TranscoderSession, fname string, profile ffmpeg.VideoProfile, renditionCount int) (outputProduced, outputValid bool, elapsed time.Duration, err error) {
 	transcoder := tf(device)
 	outputProfiles := make([]ffmpeg.VideoProfile, 0, renditionCount)
 	for i := 0; i < renditionCount; i++ {
 		outputProfiles = append(outputProfiles, profile)
 	}
 	metadata := &SegTranscodingMetadata{Fname: fname, Profiles: outputProfiles}
+	start := time.Now()
 	td, err := transcoder.Transcode(context.Background(), metadata)
+	elapsed = time.Since(start)
 	transcoder.Stop()
 	if err != nil {
-		return false, false, err
+		return false, false, elapsed, err
 	}
 	outputProduced = len(td.Segments) > 0
 	outputValid = td.Pixels > 0
-	return outputProduced, outputValid, err
+	return outputProduced, outputValid, elapsed, err
+}
+
+// BootCalibration holds per-device timing from boot-time capability tests,
+// used to seed the CapacityManager's realtime ratio EMA.
+type BootCalibration struct {
+	// DeviceTiming maps device ID to the fastest transcode duration observed during capability testing.
+	DeviceTiming map[string]time.Duration
 }
 
 // Test which capabilities transcoder supports
-func TestTranscoderCapabilities(devices []string, tf func(device string) TranscoderSession) (caps []Capability, fatalError error) {
+func TestTranscoderCapabilities(devices []string, tf func(device string) TranscoderSession) (caps []Capability, calibration *BootCalibration, fatalError error) {
+	calibration = &BootCalibration{DeviceTiming: make(map[string]time.Duration)}
+
 	// disable logging, unless verbosity is set
 	vFlag := flag.Lookup("v").Value.String()
 	detailsMsg := ""
@@ -357,7 +368,7 @@ func TestTranscoderCapabilities(devices []string, tf func(device string) Transco
 				// do it only once
 				runRestrictedSessionTest = false
 				// if 4 renditions didn't succeed, try 3 renditions on first device to check if it could be session limit
-				outputProduced, outputValid, err := testAccelTranscode(devices[0], tf, params.SegmentPath, params.OutProfile, 3)
+				outputProduced, outputValid, _, err := testAccelTranscode(devices[0], tf, params.SegmentPath, params.OutProfile, 3)
 				if err != nil && outputProduced && outputValid {
 					glog.Error("Maximum number of simultaneous NVENC video encoding sessions is restricted by driver")
 					fatalError = fmt.Errorf("maximum number of simultaneous NVENC video encoding sessions is restricted by driver")
@@ -370,7 +381,7 @@ func TestTranscoderCapabilities(devices []string, tf func(device string) Transco
 		}
 		// check that capability is supported on all devices
 		for _, device := range devices {
-			outputProduced, outputValid, err := testAccelTranscode(device, tf, params.SegmentPath, params.OutProfile, 4)
+			outputProduced, outputValid, elapsed, err := testAccelTranscode(device, tf, params.SegmentPath, params.OutProfile, 4)
 			if err != nil {
 				glog.Infof("%s %q is not supported on device %s%s", params.Kind(), params.Name(), device, detailsMsg)
 				// likely means capability is not supported, don't check on other devices
@@ -383,13 +394,17 @@ func TestTranscoderCapabilities(devices []string, tf func(device string) Transco
 				transcodingFailed()
 				return fatalError == nil
 			}
+			// Track fastest successful transcode per device for boot calibration
+			if prev, ok := calibration.DeviceTiming[device]; !ok || elapsed < prev {
+				calibration.DeviceTiming[device] = elapsed
+			}
 			// no error creating 4 renditions - disable 3 renditions test, as restriction is on driver level, not device
 			runRestrictedSessionTest = false
 		}
 		caps = append(caps, params.Cap)
 		return true
 	})
-	return caps, fatalError
+	return caps, calibration, fatalError
 }
 
 func testSoftwareTranscode(tmpdir string, fname string, profile ffmpeg.VideoProfile, renditionCount int) (outputProduced, outputValid bool, err error) {
@@ -497,7 +512,7 @@ func parseURI(uri string) (string, uint64, error) {
 	return mid, seqNo, err
 }
 
-func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts []ffmpeg.TranscodeOptions) (*TranscodeData, error) {
+func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts []ffmpeg.TranscodeOptions, deviceID string) (*TranscodeData, error) {
 	if len(res.Encoded) != len(opts) {
 		return nil, errors.New("lengths of results and options different")
 	}
@@ -518,6 +533,7 @@ func resToTranscodeData(ctx context.Context, res *ffmpeg.TranscodeResults, opts 
 	return &TranscodeData{
 		Segments: segments,
 		Pixels:   res.Decoded.Pixels,
+		DeviceID: deviceID,
 	}, nil
 }
 
