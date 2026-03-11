@@ -143,6 +143,7 @@ type LivepeerNode struct {
 	ExternalCapabilities *ExternalCapabilities
 	AutoAdjustPrice      bool
 	AutoSessionLimit     bool
+	CapacityMgr          *CapacityManager
 
 	// Broadcaster public fields
 	Sender     pm.Sender

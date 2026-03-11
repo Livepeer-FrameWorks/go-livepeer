@@ -198,6 +198,11 @@ type LivepeerConfig struct {
 	AutoDepositMinDeposit *string
 	AutoDepositGasReserve *string
 	AutoDepositInterval   *time.Duration
+
+	// Dynamic capacity management
+	CapacityMode            *string
+	CapacityAcceptThreshold *float64
+	CapacityRejectThreshold *float64
 }
 
 // DefaultLivepeerConfig creates LivepeerConfig exactly the same as when no flags are passed to the livepeer process.
@@ -238,6 +243,9 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultVideotoolbox := ""
 	defaultHevcDecoding := false
 	defaultTestTranscoder := true
+	defaultCapacityMode := "dynamic"
+	defaultCapacityAcceptThreshold := 0.70
+	defaultCapacityRejectThreshold := 0.80
 
 	// AI:
 	defaultAIServiceRegistry := false
@@ -344,30 +352,33 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		VerifierPath: &defaultVerifierPath,
 
 		// Transcoding:
-		Orchestrator:         &defaultOrchestrator,
-		Transcoder:           &defaultTranscoder,
-		Gateway:              &defaultGateway,
-		Broadcaster:          &defaultBroadcaster,
-		OrchSecret:           &defaultOrchSecret,
-		TranscodingOptions:   &defaultTranscodingOptions,
-		MaxAttempts:          &defaultMaxAttempts,
-		SelectRandWeight:     &defaultSelectRandWeight,
-		SelectStakeWeight:    &defaultSelectStakeWeight,
-		SelectPriceWeight:    &defaultSelectPriceWeight,
-		SelectPriceExpFactor: &defaultSelectPriceExpFactor,
-		MaxSessions:          &defaultMaxSessions,
-		OrchPerfStatsURL:     &defaultOrchPerfStatsURL,
-		Region:               &defaultRegion,
-		MinPerfScore:         &defaultMinPerfScore,
-		DiscoveryTimeout:     &defaultDiscoveryTimeout,
-		ExtraNodes:           &defaultExtraNodes,
-		CurrentManifest:      &defaultCurrentManifest,
-		Nvidia:               &defaultNvidia,
-		Netint:               &defaultNetint,
-		QSV:                  &defaultQSV,
-		Videotoolbox:         &defaultVideotoolbox,
-		HevcDecoding:         &defaultHevcDecoding,
-		TestTranscoder:       &defaultTestTranscoder,
+		Orchestrator:            &defaultOrchestrator,
+		Transcoder:              &defaultTranscoder,
+		Gateway:                 &defaultGateway,
+		Broadcaster:             &defaultBroadcaster,
+		OrchSecret:              &defaultOrchSecret,
+		TranscodingOptions:      &defaultTranscodingOptions,
+		MaxAttempts:             &defaultMaxAttempts,
+		SelectRandWeight:        &defaultSelectRandWeight,
+		SelectStakeWeight:       &defaultSelectStakeWeight,
+		SelectPriceWeight:       &defaultSelectPriceWeight,
+		SelectPriceExpFactor:    &defaultSelectPriceExpFactor,
+		MaxSessions:             &defaultMaxSessions,
+		OrchPerfStatsURL:        &defaultOrchPerfStatsURL,
+		Region:                  &defaultRegion,
+		MinPerfScore:            &defaultMinPerfScore,
+		DiscoveryTimeout:        &defaultDiscoveryTimeout,
+		ExtraNodes:              &defaultExtraNodes,
+		CurrentManifest:         &defaultCurrentManifest,
+		Nvidia:                  &defaultNvidia,
+		Netint:                  &defaultNetint,
+		QSV:                     &defaultQSV,
+		Videotoolbox:            &defaultVideotoolbox,
+		HevcDecoding:            &defaultHevcDecoding,
+		TestTranscoder:          &defaultTestTranscoder,
+		CapacityMode:            &defaultCapacityMode,
+		CapacityAcceptThreshold: &defaultCapacityAcceptThreshold,
+		CapacityRejectThreshold: &defaultCapacityRejectThreshold,
 
 		// AI:
 		AIServiceRegistry:        &defaultAIServiceRegistry,
@@ -661,6 +672,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	}
 
 	var transcoderCaps []core.Capability
+	var bootCal *core.BootCalibration
 	if *cfg.Transcoder {
 		core.WorkDir = *cfg.Datadir
 		accel := ffmpeg.Software
@@ -696,7 +708,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			glog.Infof("Transcoding on these %v devices: %v", accelName, devices)
 			// Test transcoding with specified device
 			if *cfg.TestTranscoder {
-				transcoderCaps, err = core.TestTranscoderCapabilities(devices, tf)
+				transcoderCaps, bootCal, err = core.TestTranscoderCapabilities(devices, tf)
 				if err != nil {
 					glog.Exit(err)
 				}
@@ -715,6 +727,39 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			}
 			transcoderCaps = append(core.DefaultCapabilities(), caps...)
 			n.Transcoder = core.NewLocalTranscoder(*cfg.Datadir)
+		}
+
+		// Initialize dynamic capacity management
+		if *cfg.CapacityMode == "dynamic" {
+			var deviceIDs []string
+			if accel != ffmpeg.Software {
+				deviceIDs, _ = common.ParseAccelDevices(devicesStr, accel)
+			} else {
+				deviceIDs = []string{"cpu"}
+			}
+			n.CapacityMgr = core.NewCapacityManager(
+				deviceIDs,
+				accel,
+				*cfg.CapacityAcceptThreshold,
+				*cfg.CapacityRejectThreshold,
+				core.GetHWMonitorFactory(accel),
+			)
+			n.CapacityMgr.Start()
+			// Seed EMA from boot calibration if available
+			if bootCal != nil {
+				for dev, elapsed := range bootCal.DeviceTiming {
+					// Test segments are ~2s; use the ratio as initial EMA baseline
+					ratio := elapsed.Seconds() / 2.0
+					n.CapacityMgr.SeedBaseline(dev, ratio)
+					glog.Infof("Boot calibration: device %s transcode took %v (ratio=%.3f)", dev, elapsed, ratio)
+				}
+			}
+			// Wire CapacityManager into LB for utilization-aware GPU selection
+			if lbt, ok := n.Transcoder.(*core.LoadBalancingTranscoder); ok {
+				lbt.SetCapacityManager(n.CapacityMgr)
+			}
+			glog.Infof("Dynamic capacity management enabled (accept=%.0f%%, reject=%.0f%%) for %d device(s)",
+				*cfg.CapacityAcceptThreshold*100, *cfg.CapacityRejectThreshold*100, len(deviceIDs))
 		}
 
 		if cfg.HevcDecoding == nil {
