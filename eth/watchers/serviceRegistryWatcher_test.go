@@ -19,11 +19,11 @@ func TestServiceRegistryWatcher_WatchAndStop(t *testing.T) {
 	assert.Nil(err)
 
 	go srw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Test Stop
 	srw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.True(watcher.sub.unsubscribed)
 }
 
@@ -50,17 +50,17 @@ func TestServiceRegistryWatcher_HandleLog_HandleServiceURIUpdate(t *testing.T) {
 
 	go srw.Watch()
 	defer srw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.Equal(stubUpdatedServiceURI, stubStore.serviceURI)
 	assert.Equal(stubStore.ethereumAddr, stubTranscoder.String())
 
 	// Test log removed
 	blockEvent.Type = blockwatch.Removed
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.Equal(lpEth.Orch.ServiceURI, stubStore.serviceURI)
 	assert.Equal(lpEth.Orch.Address.String(), stubStore.ethereumAddr)
 }

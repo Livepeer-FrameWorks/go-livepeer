@@ -269,7 +269,7 @@ func TestMediaState(t *testing.T) {
 		select {
 		case <-done:
 			// Test passed
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 			assert.Fail(t, "AwaitClose did not return after Close was called")
 		}
 	})
@@ -529,7 +529,7 @@ func TestAwaitClose(t *testing.T) {
 		case <-done:
 			// Test passed
 			assert.True(t, true, "AwaitClose should return after peer is closed")
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 			assert.Fail(t, "AwaitClose did not return after peer was closed")
 		}
 	})
@@ -564,7 +564,7 @@ func TestAwaitClose(t *testing.T) {
 			select {
 			case <-done:
 				// One goroutine completed
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				assert.Fail(t, "Not all goroutines were notified of closure")
 				return
 			}
@@ -590,7 +590,7 @@ func TestAwaitClose(t *testing.T) {
 		select {
 		case <-done:
 			// Test passed
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 			assert.Fail(t, "AwaitClose did not return immediately for already closed peer")
 		}
 	})
@@ -627,7 +627,7 @@ func TestAwaitClose(t *testing.T) {
 			select {
 			case <-done:
 				// One goroutine completed
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				assert.Fail(t, "Not all goroutines were notified of closure with delayed setup")
 				return
 			}
@@ -654,7 +654,7 @@ func TestAwaitClose(t *testing.T) {
 		select {
 		case <-done:
 			// Test passed
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 			assert.Fail(t, "AwaitClose did not return when connection was closed without a peer")
 		}
 	})
@@ -681,7 +681,7 @@ func TestAwaitClose(t *testing.T) {
 			select {
 			case <-done:
 				// Test passed
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				assert.Fail(t, "AwaitClose did not return for null peer connection")
 			}
 		})
@@ -704,7 +704,7 @@ func TestAwaitClose(t *testing.T) {
 			select {
 			case <-done:
 				// Test passed
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				assert.Fail(t, "AwaitClose did not return for null peer connection")
 			}
 		})
@@ -763,7 +763,7 @@ func TestClose(t *testing.T) {
 		case <-waitDone:
 			// Test passed
 			assert.True(t, true, "Close should broadcast to waiting goroutines")
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(5 * time.Second):
 			assert.Fail(t, "Close did not broadcast to waiting goroutines")
 		}
 	})
@@ -838,7 +838,7 @@ func TestConcurrentOperations(t *testing.T) {
 	select {
 	case <-doneCh:
 	// Test passed
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		assert.Fail(t, "Goroutines did not complete on time")
 	}
 

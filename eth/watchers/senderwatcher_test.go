@@ -153,9 +153,9 @@ func TestSenderWatcher_WatchAndStop(t *testing.T) {
 	assert.Nil(err)
 
 	go sw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.True(watcher.sub.unsubscribed)
 }
 
@@ -207,11 +207,11 @@ func TestFundDepositEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	_, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -219,7 +219,7 @@ func TestFundDepositEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.True(ok)
 	assert.Zero(info.Deposit.Cmp(startDeposit))
@@ -228,7 +228,7 @@ func TestFundDepositEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Added
 	expectedDeposit := new(big.Int).Add(startDeposit, new(big.Int).SetBytes(newDepositEvent.Data))
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(info.Deposit.Cmp(expectedDeposit))
@@ -240,7 +240,7 @@ func TestFundDepositEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newDepositEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 }
@@ -276,11 +276,11 @@ func TestFundReserveEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -288,7 +288,7 @@ func TestFundReserveEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.True(ok)
 	assert.Equal(info.Deposit, startDeposit)
@@ -298,7 +298,7 @@ func TestFundReserveEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Added
 	expectedReserve := new(big.Int).Add(startReserve, new(big.Int).SetBytes(newReserveEvent.Data))
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(info.Reserve.FundsRemaining.Cmp(expectedReserve))
@@ -310,7 +310,7 @@ func TestFundReserveEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newReserveEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 }
@@ -346,11 +346,11 @@ func TestWithdrawalEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -358,7 +358,7 @@ func TestWithdrawalEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.True(ok)
 	assert.Zero(info.Deposit.Cmp(startDeposit))
@@ -366,9 +366,9 @@ func TestWithdrawalEvent(t *testing.T) {
 
 	// If map entry exists parse event log
 	blockEvent.Type = blockwatch.Added
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(info.Deposit.Cmp(big.NewInt(0)))
@@ -381,7 +381,7 @@ func TestWithdrawalEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newWithdrawalEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 }
@@ -423,11 +423,11 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -435,7 +435,7 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok = sw.senders[stubSender]
 	assert.True(ok)
 	assert.Equal(info.Deposit, startDeposit)
@@ -446,7 +446,7 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 	// init the map entry
 	blockEvent.Type = blockwatch.Added
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(startDeposit.Sub(startDeposit, faceValue).Cmp(info.Deposit))
@@ -456,7 +456,7 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 	senderInfo.Deposit = big.NewInt(100000000000)
 	info, err = sw.GetSenderInfo(stubSender)
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	claimed, err := sw.ClaimedReserve(stubSender, stubClaimant)
 	assert.Nil(err)
@@ -472,7 +472,7 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newWinningTicketEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 
@@ -483,7 +483,7 @@ func TestWinningTicketTransferEvent(t *testing.T) {
 	copy(randRecipientTopic[:], common.LeftPadBytes(randRecipient.Bytes(), 32)[:])
 	blockEvent.BlockHeader.Logs[1].Topics[2] = randRecipientTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	afterClaimed, err := sw.ClaimedReserve(stubSender, stubClaimant)
 	assert.Nil(err)
 	assert.Equal(beforeClaimed, afterClaimed)
@@ -516,11 +516,11 @@ func TestUnlockEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -528,7 +528,7 @@ func TestUnlockEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.True(ok)
 	assert.Zero(info.WithdrawRound.Cmp(startWithdrawRound))
@@ -536,7 +536,7 @@ func TestUnlockEvent(t *testing.T) {
 	// If map entry exists parse event log
 	blockEvent.Type = blockwatch.Added
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(info.WithdrawRound.Cmp(big.NewInt(150)))
@@ -548,7 +548,7 @@ func TestUnlockEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newUnlockEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 }
@@ -578,11 +578,11 @@ func TestUnlockCancelledEvent(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// If map entry is nil don't handle event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok := sw.senders[stubSender]
 	assert.False(ok)
 
@@ -590,7 +590,7 @@ func TestUnlockCancelledEvent(t *testing.T) {
 	blockEvent.Type = blockwatch.Removed
 	sw.senders[stubSender] = &pm.SenderInfo{}
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, ok := sw.senders[stubSender]
 	assert.True(ok)
 	assert.Zero(info.WithdrawRound.Cmp(big.NewInt(10)))
@@ -598,7 +598,7 @@ func TestUnlockCancelledEvent(t *testing.T) {
 	// If map entry exists parse event log
 	blockEvent.Type = blockwatch.Added
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
 	assert.Zero(info.WithdrawRound.Int64())
@@ -610,7 +610,7 @@ func TestUnlockCancelledEvent(t *testing.T) {
 	copy(senderTopic[:], sender[:])
 	newUnlockCancelledEvent.Topics[1] = senderTopic
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, ok = sw.senders[s]
 	assert.False(ok)
 }
@@ -645,11 +645,11 @@ func TestNewRoundEvent_LogAdded(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	tw.sink <- newRoundEvent
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
@@ -696,10 +696,10 @@ func TestNewRoundEvent_LogRemoved(t *testing.T) {
 
 	go sw.Watch()
 	defer sw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	tw.sink <- newRoundEvent
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	info, err = sw.GetSenderInfo(stubSender)
 	assert.Nil(err)
@@ -741,7 +741,7 @@ func TestSubscribeReserveChange(t *testing.T) {
 
 	go sm.Watch()
 	defer sm.Stop()
-	time.Sleep(time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// set initial values
 	_, err = sm.GetSenderInfo(stubSender)

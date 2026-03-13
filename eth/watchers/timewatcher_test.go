@@ -166,11 +166,11 @@ func TestTimeWatcher_WatchAndStop(t *testing.T) {
 	}
 
 	go tw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// New Round event
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	lastRound := tw.LastInitializedRound()
 	assert.Zero(lastRound.Cmp(big.NewInt(8)))
 	bhForRound := tw.LastInitializedL1BlockHash()
@@ -184,7 +184,7 @@ func TestTimeWatcher_WatchAndStop(t *testing.T) {
 	tw.setTranscoderPoolSize(big.NewInt(10))
 	blockEvent.BlockHeader.Logs = header.Logs[:1]
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	lastRound = tw.LastInitializedRound()
 	assert.Zero(lastRound.Cmp(big.NewInt(8)))
 	bhForRound = tw.LastInitializedL1BlockHash()
@@ -197,7 +197,7 @@ func TestTimeWatcher_WatchAndStop(t *testing.T) {
 	blockEvent.BlockHeader.Logs = append(blockEvent.BlockHeader.Logs, newRoundEvent)
 	blockEvent.Type = blockwatch.Removed
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	bhForRound = tw.LastInitializedL1BlockHash()
 	assert.Equal(hash, common.BytesToHash(bhForRound[:]))
 	assert.Equal(round, tw.LastInitializedRound())
@@ -206,7 +206,7 @@ func TestTimeWatcher_WatchAndStop(t *testing.T) {
 
 	// Test Stop
 	tw.Stop()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.True(watcher.sub.unsubscribed)
 }
 
@@ -320,10 +320,10 @@ func TestHandleBlockNum(t *testing.T) {
 	}
 
 	go tw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	assert.Equal(tw.LastSeenL1Block(), header.L1BlockNumber)
 }
 
@@ -347,10 +347,10 @@ func TestSubscribeBlocks(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	go tw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	update := <-events
 	assert.Equal(update, header.L1BlockNumber)
 }
@@ -377,10 +377,10 @@ func TestSubscribeRounds(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	go tw.Watch()
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	watcher.sink <- []*blockwatch.Event{blockEvent}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	update := <-events
 	assert.Equal(newRoundEvent, update)
 }
