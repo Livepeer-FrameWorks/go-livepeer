@@ -207,6 +207,8 @@ func submitTextToImage(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -235,9 +237,11 @@ func submitTextToImage(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenTextToImageWithResponse(ctx, req, setHeaders)
@@ -250,12 +254,16 @@ func submitTextToImage(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-image", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-image", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -271,6 +279,7 @@ func submitTextToImage(ctx context.Context, params aiRequestParams, sess *AISess
 
 		monitor.AIRequestFinished(ctx, "text-to-image", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-image", frameworksModelID(req.ModelId), true, nil, took)
 
 	return resp.JSON200, nil
 }
@@ -356,6 +365,8 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -364,6 +375,8 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -372,6 +385,8 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	config, _, err := image.DecodeConfig(imageRdr)
@@ -379,6 +394,8 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -389,9 +406,11 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenImageToImageWithBodyWithResponse(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -404,12 +423,16 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-image", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -425,6 +448,7 @@ func submitImageToImage(ctx context.Context, params aiRequestParams, sess *AISes
 
 		monitor.AIRequestFinished(ctx, "image-to-image", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-image", frameworksModelID(req.ModelId), true, nil, took)
 
 	return resp.JSON200, nil
 }
@@ -491,6 +515,8 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -499,6 +525,8 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -518,9 +546,11 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenImageToVideoWithBody(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -529,6 +559,8 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -538,11 +570,15 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, errors.New(string(data))
+		errBody := errors.New(string(data))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -555,6 +591,8 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-video", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
@@ -569,6 +607,7 @@ func submitImageToVideo(ctx context.Context, params aiRequestParams, sess *AISes
 
 		monitor.AIRequestFinished(ctx, "image-to-video", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-video", frameworksModelID(req.ModelId), true, nil, took)
 
 	return &res, nil
 }
@@ -641,6 +680,8 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -649,6 +690,8 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -657,6 +700,8 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	config, _, err := image.DecodeConfig(imageRdr)
@@ -664,6 +709,8 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	outPixels := int64(config.Height) * int64(config.Width)
@@ -673,9 +720,11 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenUpscaleWithBodyWithResponse(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -684,12 +733,16 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "upscale", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -708,6 +761,7 @@ func submitUpscale(ctx context.Context, params aiRequestParams, sess *AISession,
 
 		monitor.AIRequestFinished(ctx, "upscale", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "upscale", frameworksModelID(req.ModelId), true, nil, took)
 
 	return resp.JSON200, nil
 }
@@ -739,6 +793,8 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -747,6 +803,8 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -755,6 +813,8 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	config, _, err := image.DecodeConfig(imageRdr)
@@ -762,6 +822,8 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	outPixels := int64(config.Height) * int64(config.Width)
@@ -771,9 +833,11 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenSegmentAnything2WithBodyWithResponse(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -782,12 +846,16 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "segment-anything-2", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -806,6 +874,7 @@ func submitSegmentAnything2(ctx context.Context, params aiRequestParams, sess *A
 
 		monitor.AIRequestFinished(ctx, "segment-anything-2", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "segment-anything-2", frameworksModelID(req.ModelId), true, nil, took)
 
 	return resp.JSON200, nil
 }
@@ -864,6 +933,8 @@ func submitTextToSpeech(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-speech", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -879,9 +950,11 @@ func submitTextToSpeech(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-speech", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenTextToSpeechWithResponse(ctx, req, setHeaders)
@@ -890,12 +963,16 @@ func submitTextToSpeech(ctx context.Context, params aiRequestParams, sess *AISes
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-speech", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -914,16 +991,33 @@ func submitTextToSpeech(ctx context.Context, params aiRequestParams, sess *AISes
 
 		monitor.AIRequestFinished(ctx, "text-to-speech", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
-
 	var res worker.AudioResponse
 	if err := json.Unmarshal(resp.Body, &res); err != nil {
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "text-to-speech", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "text-to-speech", frameworksModelID(req.ModelId), true, nil, took)
+
 	return &res, nil
+}
+
+func broadcastSessionFromAISession(sess *AISession) *BroadcastSession {
+	if sess == nil {
+		return nil
+	}
+	return sess.BroadcastSession
+}
+
+func frameworksModelID(modelID *string) string {
+	if modelID == nil {
+		return ""
+	}
+	return *modelID
 }
 
 // CalculateAudioToTextLatencyScore computes the time taken per second of audio for an audio-to-text request.
@@ -955,6 +1049,8 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -971,6 +1067,8 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -979,6 +1077,8 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -988,9 +1088,11 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenAudioToTextWithBody(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -999,6 +1101,8 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -1008,11 +1112,15 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, errors.New(string(data))
+		errBody := errors.New(string(data))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -1025,6 +1133,8 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "audio-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
@@ -1039,6 +1149,7 @@ func submitAudioToText(ctx context.Context, params aiRequestParams, sess *AISess
 
 		monitor.AIRequestFinished(ctx, "audio-to-text", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "audio-to-text", frameworksModelID(req.ModelId), true, nil, took)
 
 	return &res, nil
 }
@@ -1056,12 +1167,15 @@ func submitLiveVideoToVideo(ctx context.Context, params aiRequestParams, sess *A
 	if hasRemoteSigner(params) {
 		rpp, ok := params.liveParams.paymentSender.(*remotePaymentSender)
 		if !ok {
-			return nil, errors.New("remote sender was not the correct type")
+			errBody := errors.New("remote sender was not the correct type")
+			emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, errBody, 0)
+			return nil, errBody
 		}
 		res, err := rpp.RequestPayment(ctx, &SegmentInfoSender{
-			sess: sess.BroadcastSession,
+			sess: broadcastSessionFromAISession(sess),
 		})
 		if err != nil {
+			emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, err, 0)
 			return nil, err
 		}
 		paymentHeaders = func(_ context.Context, req *http.Request) error {
@@ -1075,7 +1189,7 @@ func submitLiveVideoToVideo(ctx context.Context, params aiRequestParams, sess *A
 		// Live Video should not reuse the existing session balance, because it could lead to not sending the init
 		// payment, which in turns may cause "Insufficient Balance" on the Orchestrator's side.
 		// It works differently than other AI Jobs, because Live Video is accounted by mid on the Orchestrator's side.
-		clearSessionBalance(sess.BroadcastSession, core.RandomManifestID())
+		clearSessionBalance(broadcastSessionFromAISession(sess), core.RandomManifestID())
 
 		var (
 			balUpdate *BalanceUpdate
@@ -1086,9 +1200,11 @@ func submitLiveVideoToVideo(ctx context.Context, params aiRequestParams, sess *A
 			if monitor.Enabled {
 				monitor.AIRequestError(err.Error(), "LiveVideoToVideo", *req.ModelId, sess.OrchestratorInfo)
 			}
+			emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, err, 0)
+
 			return nil, err
 		}
-		defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+		defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 	}
 
 	// Send request to orchestrator
@@ -1097,24 +1213,33 @@ func submitLiveVideoToVideo(ctx context.Context, params aiRequestParams, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "LiveVideoToVideo", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
 	reqTimeout := 5 * time.Second
 	reqCtx, cancel := context.WithTimeout(ctx, reqTimeout)
 	defer cancel()
+	start := time.Now()
 	resp, err := client.GenLiveVideoToVideoWithResponse(reqCtx, req, paymentHeaders)
+	took := time.Since(start)
 	if err != nil {
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, err, took)
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	if resp.JSON200.ControlUrl == nil {
-		return nil, errors.New("control URL is missing")
+		errBody := errors.New("control URL is missing")
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "LiveVideoToVideo", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	return resp, nil
@@ -1157,6 +1282,8 @@ func submitLLM(ctx context.Context, params aiRequestParams, sess *AISession, req
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "llm", *req.Model, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, err, 0)
+
 		return nil, err
 	}
 
@@ -1170,9 +1297,11 @@ func submitLLM(ctx context.Context, params aiRequestParams, sess *AISession, req
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "llm", *req.Model, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenLLM(ctx, req, setHeaders)
@@ -1180,12 +1309,16 @@ func submitLLM(ctx context.Context, params aiRequestParams, sess *AISession, req
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "llm", *req.Model, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, err, time.Since(start))
+
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+		errBody := fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, errBody, time.Since(start))
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -1240,6 +1373,8 @@ func handleSSEStream(ctx context.Context, body io.ReadCloser, sess *AISession, r
 			}
 			monitor.AIRequestFinished(ctx, "llm", *req.Model, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), true, nil, took)
+
 	}()
 
 	return streamChan, nil
@@ -1252,6 +1387,8 @@ func handleNonStreamingResponse(ctx context.Context, body io.ReadCloser, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "llm", *req.Model, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, err, time.Since(start))
+
 		return nil, err
 	}
 
@@ -1260,6 +1397,8 @@ func handleNonStreamingResponse(ctx context.Context, body io.ReadCloser, sess *A
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "llm", *req.Model, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), false, err, time.Since(start))
+
 		return nil, err
 	}
 
@@ -1274,6 +1413,7 @@ func handleNonStreamingResponse(ctx context.Context, body io.ReadCloser, sess *A
 		}
 		monitor.AIRequestFinished(ctx, "llm", *req.Model, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "llm", frameworksModelID(req.Model), true, nil, took)
 
 	return &res, nil
 }
@@ -1293,6 +1433,8 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -1301,6 +1443,8 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -1309,6 +1453,8 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 	config, _, err := image.DecodeConfig(imageRdr)
@@ -1316,6 +1462,8 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
 
@@ -1326,9 +1474,11 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, 0)
+
 		return nil, err
 	}
-	defer completeBalanceUpdate(sess.BroadcastSession, balUpdate)
+	defer completeBalanceUpdate(broadcastSessionFromAISession(sess), balUpdate)
 
 	start := time.Now()
 	resp, err := client.GenImageToTextWithBodyWithResponse(ctx, mw.FormDataContentType(), &buf, setHeaders)
@@ -1341,12 +1491,16 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 		if monitor.Enabled {
 			monitor.AIRequestError(err.Error(), "image-to-text", *req.ModelId, sess.OrchestratorInfo)
 		}
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, err, took)
+
 		return nil, err
 	}
 
 	if resp.JSON200 == nil {
 		// TODO: Replace trim newline with better error spec from O
-		return nil, errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		errBody := errors.New(strings.TrimSuffix(string(resp.Body), "\n"))
+		emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), false, errBody, took)
+		return nil, errBody
 	}
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
@@ -1362,6 +1516,7 @@ func submitImageToText(ctx context.Context, params aiRequestParams, sess *AISess
 
 		monitor.AIRequestFinished(ctx, "image-to-text", *req.ModelId, monitor.AIJobInfo{LatencyScore: sess.LatencyScore, PricePerUnit: pricePerAIUnit}, sess.OrchestratorInfo)
 	}
+	emitFrameworksAIOutcome(ctx, broadcastSessionFromAISession(sess), "image-to-text", frameworksModelID(req.ModelId), true, nil, took)
 
 	return resp.JSON200, nil
 }
@@ -1628,7 +1783,7 @@ func errContainsMsg(err error, msgs ...string) bool {
 }
 func prepareAIPayment(ctx context.Context, sess *AISession, outPixels int64) (worker.RequestEditorFn, *BalanceUpdate, error) {
 	// genSegCreds expects a stream.HLSSegment so in order to reuse it here we pass a dummy object
-	segCreds, err := genSegCreds(sess.BroadcastSession, &stream.HLSSegment{}, nil)
+	segCreds, err := genSegCreds(broadcastSessionFromAISession(sess), &stream.HLSSegment{}, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1646,13 +1801,13 @@ func prepareAIPayment(ctx context.Context, sess *AISession, outPixels int64) (wo
 		return nil, nil, err
 	}
 
-	balUpdate, err := newBalanceUpdate(sess.BroadcastSession, fee)
+	balUpdate, err := newBalanceUpdate(broadcastSessionFromAISession(sess), fee)
 	if err != nil {
 		return nil, nil, err
 	}
 	balUpdate.Debit = fee
 
-	payment, err := genPayment(ctx, sess.BroadcastSession, balUpdate.NumTickets)
+	payment, err := genPayment(ctx, broadcastSessionFromAISession(sess), balUpdate.NumTickets)
 	if err != nil {
 		clog.Errorf(ctx, "Could not create payment err=%q", err)
 

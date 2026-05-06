@@ -1,0 +1,91 @@
+# Auto-bump github.com/Livepeer-FrameWorks/monorepo/pkg when the monorepo
+# pushes a change to master under pkg/. The monorepo's
+# .github/workflows/notify-go-livepeer-pkg-bump.yml dispatches the event.
+#
+# This workflow runs `go get monorepo/pkg@<sha>`, removes the local-dev
+# replace directive (no-op if already removed), runs `go mod tidy`, and
+# opens a PR. Merging the PR + tagging a release is still a human step —
+# the gateway's release cadence shouldn't be one-PR-per-monorepo-commit.
+#
+# Triggers:
+#   - repository_dispatch from monorepo (event-type: monorepo-pkg-changed)
+#   - workflow_dispatch (manual; useful before cutting a gateway release)
+#   - schedule (daily safety-net in case dispatch is missed)
+
+name: Bump monorepo/pkg
+
+on:
+  repository_dispatch:
+    types: [monorepo-pkg-changed]
+  workflow_dispatch:
+    inputs:
+      monorepo_sha:
+        description: "Monorepo commit SHA to pin (defaults to master tip)"
+        required: false
+        default: master
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve target SHA
+        id: target
+        run: |
+          if [ -n "${{ github.event.client_payload.monorepo_sha }}" ]; then
+            echo "sha=${{ github.event.client_payload.monorepo_sha }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.monorepo_sha }}" ]; then
+            echo "sha=${{ github.event.inputs.monorepo_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=master" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Drop local-dev replace and pin pseudo-version
+        env:
+          GOPRIVATE: github.com/Livepeer-FrameWorks/*
+        run: |
+          set -euo pipefail
+          # Remove the local-dev replace if present. Idempotent — no-op when
+          # the line is already gone.
+          go mod edit -dropreplace=github.com/Livepeer-FrameWorks/monorepo/pkg
+          go get github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.target.outputs.sha }}
+          go mod tidy
+          go build ./... >/dev/null
+
+      - name: Capture pinned version
+        id: pinned
+        run: |
+          VER=$(go list -m github.com/Livepeer-FrameWorks/monorepo/pkg | awk '{print $2}')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bot/bump-monorepo-pkg
+          delete-branch: true
+          title: "bump: monorepo/pkg to ${{ steps.pinned.outputs.version }}"
+          commit-message: |
+            bump: monorepo/pkg to ${{ steps.pinned.outputs.version }}
+
+            Triggered by monorepo push @ ${{ github.event.client_payload.monorepo_sha || github.event.inputs.monorepo_sha || 'master' }}.
+          body: |
+            Auto-bump from `Livepeer-FrameWorks/monorepo` push.
+
+            - Pinned: `github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.pinned.outputs.version }}`
+            - Local-dev `replace ../monorepo/pkg` removed (idempotent).
+            - `go mod tidy` + `go build ./...` clean.
+
+            Merge when ready; tag a release after merge to land in the next monorepo release manifest fetch.
+          labels: |
+            dependencies
+            monorepo-pkg

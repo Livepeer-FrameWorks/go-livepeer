@@ -19,12 +19,16 @@ import (
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/eth"
 	"github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/lpms/ffmpeg"
 	"github.com/livepeer/lpms/stream"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto"
 
 	"github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
@@ -443,7 +447,19 @@ func verifySegCreds(ctx context.Context, orch Orchestrator, segCreds string, bro
 }
 
 func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters,
-	nonce uint64, verified bool) (*ReceivedTranscodeResult, error) {
+	nonce uint64, verified bool) (result *ReceivedTranscodeResult, retErr error) {
+
+	// Emit once from the return boundary so success and failure paths use the
+	// same instance key and timing fields.
+	submitStart := time.Now()
+	var (
+		uploadDurFW    time.Duration
+		transcodeDurFW time.Duration
+		pixelCountFW   int64
+	)
+	defer func() {
+		emitFrameworksTranscodeOutcome(ctx, sess, seg, submitStart, uploadDurFW, transcodeDurFW, pixelCountFW, result, retErr)
+	}()
 
 	uploaded := seg.Name != "" // hijack seg.Name to convey the uploaded URI
 	if sess.OrchestratorInfo != nil {
@@ -544,6 +560,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	start := time.Now()
 	resp, err := sendReqWithTimeout(req, uploadTimeout)
 	uploadDur := time.Since(start)
+	uploadDurFW = uploadDur
 	if err != nil {
 		clog.Errorf(ctx, "Unable to submit segment orch=%v orch=%s uploadDur=%s err=%q", ti.Transcoder, ti.Transcoder, uploadDur, err)
 		if monitor.Enabled {
@@ -590,6 +607,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		return nil, fmt.Errorf("body timeout: %w", err)
 	}
 	transcodeDur := tookAllDur - uploadDur
+	transcodeDurFW = transcodeDur
 
 	var tr net.TranscodeResult
 	err = proto.Unmarshal(data, &tr)
@@ -635,14 +653,20 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 
 	// We treat a response as "receiving change" where the change is the difference between the credit and debit for the update
 	balUpdate.Status = ReceivedChange
+
+	// Sum pixel counts unconditionally; pixels are useful for throughput
+	// and long-window performance stats independent of whether a price is
+	// attached to the session. Pricing computations remain gated on
+	// priceInfo below.
+	var pixelCount int64
+	for _, res := range tdata.Segments {
+		pixelCount += res.Pixels
+	}
+	pixelCountFW = pixelCount
+
 	if priceInfo != nil {
 		// The update's debit is the transcoding fee which is computed as the total number of pixels processed
 		// for all results returned multiplied by the orchestrator's price
-		var pixelCount int64
-		for _, res := range tdata.Segments {
-			pixelCount += res.Pixels
-		}
-
 		balUpdate.Debit.Mul(new(big.Rat).SetInt64(pixelCount), priceInfo)
 
 		if monitor.Enabled {
@@ -930,4 +954,140 @@ func sendReqWithTimeout(req *http.Request, timeout time.Duration) (*http.Respons
 	}
 	resp.Body.Close()
 	return nil, context.DeadlineExceeded
+}
+
+// emitFrameworksTranscodeOutcome sends the transcode row captured by
+// SubmitSegment's return-boundary defer. Early returns leave unavailable
+// timing fields at zero.
+func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, start time.Time, uploadDur, transcodeDur time.Duration, pixelCount int64, result *ReceivedTranscodeResult, err error) {
+	if !frameworks.Enabled() || sess == nil {
+		return
+	}
+	overall := uint32(time.Since(start).Milliseconds())
+
+	orchAddr := ""
+	orchURL := ""
+	if sess.OrchestratorInfo != nil {
+		if len(sess.OrchestratorInfo.Address) > 0 {
+			orchAddr = hexutil.Encode(sess.OrchestratorInfo.Address)
+		}
+		orchURL = sess.OrchestratorInfo.Transcoder
+	}
+	manifestHash := ""
+	sessionID := ""
+	streamTenantID := ""
+	var profiles []string
+	if sess.Params != nil {
+		manifestHash = hashManifest(string(sess.Params.ManifestID))
+		sessionID = sess.Params.SessionID
+		streamTenantID = sess.Params.TenantID
+		profiles = profileNames(sess.Params.Profiles)
+	}
+
+	payload := &fwpb.OrchestratorTranscodeOutcome{
+		OrchAddr:       orchAddr,
+		OrchUrl:        orchURL,
+		ResolvedIp:     frameworks.ResolvedIPForURL(orchURL),
+		SessionId:      sessionID,
+		ManifestIdHash: manifestHash,
+		SeqNo:          uint64(seg.SeqNo),
+		Success:        err == nil && result != nil,
+		UploadMs:       uint32(uploadDur.Milliseconds()),
+		TranscodeMs:    uint32(transcodeDur.Milliseconds()),
+		OverallMs:      overall,
+		Pixels:         uint64(pixelCount),
+		Profiles:       profiles,
+	}
+	if result != nil {
+		payload.LatencyScore = float32(result.LatencyScore)
+	}
+	if err != nil {
+		payload.ErrorCode = err.Error()
+		payload.ErrorKind = classifyTranscodeError(err)
+	}
+	frameworks.EmitTranscodeOutcome(ctx, streamTenantID, payload)
+}
+
+func hashManifest(mid string) string {
+	if mid == "" {
+		return ""
+	}
+	h := crypto.Keccak256([]byte(mid))
+	return hexutil.Encode(h[:8])
+}
+
+func profileNames(profs []ffmpeg.VideoProfile) []string {
+	if len(profs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(profs))
+	for _, p := range profs {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// emitFrameworksAIOutcome emits a per-AI-job outcome event for the selected
+// orchestrator. Callers invoke it at request result/error boundaries so these
+// stats do not depend on Livepeer monitor settings.
+func emitFrameworksAIOutcome(ctx context.Context, sess *BroadcastSession, pipeline, model string, success bool, ferr error, latency time.Duration) {
+	if !frameworks.Enabled() || sess == nil {
+		return
+	}
+	orchAddr := ""
+	orchURL := ""
+	if sess.OrchestratorInfo != nil {
+		if len(sess.OrchestratorInfo.Address) > 0 {
+			orchAddr = hexutil.Encode(sess.OrchestratorInfo.Address)
+		}
+		orchURL = sess.OrchestratorInfo.Transcoder
+	}
+	sessionID := ""
+	streamTenantID := ""
+	if sess.Params != nil {
+		sessionID = sess.Params.SessionID
+		streamTenantID = sess.Params.TenantID
+	}
+	var pricePerUnit int64
+	if sess.OrchestratorInfo != nil && sess.OrchestratorInfo.PriceInfo != nil {
+		pricePerUnit = sess.OrchestratorInfo.PriceInfo.PricePerUnit
+	}
+	payload := &fwpb.OrchestratorAIOutcome{
+		OrchAddr:     orchAddr,
+		OrchUrl:      orchURL,
+		ResolvedIp:   frameworks.ResolvedIPForURL(orchURL),
+		SessionId:    sessionID,
+		Pipeline:     pipeline,
+		Model:        model,
+		LatencyScore: float32(sess.LatencyScore),
+		PricePerUnit: pricePerUnit,
+		LatencyMs:    uint32(latency.Milliseconds()),
+		Success:      success,
+	}
+	if ferr != nil {
+		payload.ErrorCode = ferr.Error()
+		payload.ErrorKind = classifyTranscodeError(ferr)
+	}
+	frameworks.EmitAIOutcome(ctx, streamTenantID, payload)
+}
+
+func classifyTranscodeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "context canceled"):
+		return "canceled"
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "broken pipe"):
+		return "transport"
+	case strings.Contains(msg, "payment"), strings.Contains(msg, "ticket"):
+		return "payment"
+	case strings.Contains(msg, "auth"):
+		return "auth"
+	default:
+		return "other"
+	}
 }

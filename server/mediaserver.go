@@ -155,6 +155,9 @@ type authWebhookResponse struct {
 	VerificationFreq   uint                 `json:"verificationFreq"`
 	TimeoutMultiplier  int                  `json:"timeoutMultiplier"`
 	ForceSessionReinit bool                 `json:"forceSessionReinit"`
+	// TenantID is the FrameWorks tenant the stream belongs to. Foghorn's
+	// livepeer auth webhook sets it for Decklog outcome telemetry.
+	TenantID string `json:"tenantID,omitempty"`
 }
 
 func NewLivepeerServer(ctx context.Context, rtmpAddr string, lpNode *core.LivepeerNode, httpIngest bool, transcodingOptions string) (*LivepeerServer, error) {
@@ -386,17 +389,27 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, webhookR
 			return nil, errors.New(errMsg)
 
 		}
+		// FrameWorks tenant context propagates from the auth webhook response
+		// into StreamParameters so session outcome telemetry is tenant-scoped.
+		var fwTenantID, fwStreamID string
+		if resp != nil {
+			fwTenantID = resp.TenantID
+			fwStreamID = resp.StreamID
+		}
+
 		return &core.StreamParameters{
 			ManifestID:       mid,
 			ExternalStreamID: extStreamID,
 			SessionID:        sessionID,
 			RtmpKey:          key,
 			// HTTP push mutates `profiles` so make a copy of it
-			Profiles:         append([]ffmpeg.VideoProfile(nil), profiles...),
-			OS:               oss,
-			RecordOS:         ross,
-			VerificationFreq: VerificationFreq,
-			Nonce:            nonce,
+			Profiles:           append([]ffmpeg.VideoProfile(nil), profiles...),
+			OS:                 oss,
+			RecordOS:           ross,
+			VerificationFreq:   VerificationFreq,
+			Nonce:              nonce,
+			TenantID:           fwTenantID,
+			FrameworksStreamID: fwStreamID,
 		}, nil
 	}
 }

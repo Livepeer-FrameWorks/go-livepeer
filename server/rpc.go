@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/big"
+	gonet "net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,12 +16,14 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 
 	"github.com/livepeer/go-livepeer/ai/worker"
 	"github.com/livepeer/go-livepeer/byoc"
 	"github.com/livepeer/go-livepeer/clog"
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-livepeer/trickle"
@@ -317,12 +320,37 @@ func GetOrchestratorInfo(ctx context.Context, bcast common.Broadcaster, orchestr
 	defer conn.Close()
 
 	req, err := genOrchestratorReq(bcast, params)
-	r, err := c.GetOrchestrator(ctx, req)
+	// Capture the actual RemoteAddr the gRPC client connected to. With
+	// multi-A-record / round-robin DNS, the resolver picks one IP per dial;
+	// the FrameWorks telemetry layer needs to know which one so the per-IP
+	// vantage row carries dialed=true on the right entry. peer.Peer is
+	// populated by grpc-go before the RPC returns even on success or error.
+	var peerInfo peer.Peer
+	r, err := c.GetOrchestrator(ctx, req, grpc.Peer(&peerInfo))
+	if peerInfo.Addr != nil {
+		host := orchestratorServer.Hostname()
+		if ip := remoteIPOnly(peerInfo.Addr.String()); ip != "" {
+			frameworks.SetDialedIP(host, ip)
+		}
+	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "Could not get orchestrator orch=%v", orchestratorServer)
 	}
 
 	return r, nil
+}
+
+// remoteIPOnly strips the port from a "host:port" / "[ipv6]:port" address
+// returned by net.Addr.String(). Returns the original string on parse
+// failure since callers treat empty-vs-non-empty as the only signal.
+func remoteIPOnly(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if host, _, err := gonet.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
 }
 
 // EndTranscodingSession - the broadcaster calls EndTranscodingSession to tear down sessions used for verification only once

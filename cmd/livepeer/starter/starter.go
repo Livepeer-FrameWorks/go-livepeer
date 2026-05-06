@@ -37,6 +37,7 @@ import (
 	"github.com/livepeer/go-livepeer/eth/blockwatch"
 	"github.com/livepeer/go-livepeer/eth/watchers"
 	lpmon "github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-livepeer/server"
 	"github.com/livepeer/go-livepeer/verification"
@@ -846,6 +847,11 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		if err := startKafkaProducer(cfg); err != nil {
 			exit("Error while starting Kafka producer", err)
 		}
+	}
+
+	// Initialise FrameWorks gateway telemetry (Decklog client + GeoIP).
+	if err := frameworks.Init(ctx); err != nil {
+		exit("Error initializing FrameWorks gateway telemetry", err)
 	}
 
 	watcherErr := make(chan error)
