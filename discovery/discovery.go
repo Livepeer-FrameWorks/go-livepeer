@@ -19,8 +19,11 @@ import (
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/server"
+
+	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto"
 )
 
 var getOrchestratorTimeoutLoop = 3 * time.Second
@@ -186,6 +189,16 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 		latency := time.Since(start)
 		clog.V(common.DEBUG).Infof(ctx, "Received GetOrchInfo RPC Response from uri=%v, latency=%v", od.LocalInfo.URL, latency)
 		doingWork := info != nil && info.Transcoder != ""
+
+		// FrameWorks gateway telemetry: emit per-attempt discovery observation
+		// (success or failure) and, on success, per-instance state. This is
+		// the result/error boundary of the per-orch RPC; emitting here means
+		// failed dials are durable in periscope.orchestrator_discovery_samples
+		// instead of being lost in the success-only `discovery_results` rollup.
+		// No-op when running outside FrameWorks.
+		if frameworks.Enabled() {
+			emitFrameworksDiscovery(ctx, od, info, err, latency)
+		}
 		orchDescr := common.OrchestratorDescriptor{
 			LocalInfo: &common.OrchestratorLocalInfo{
 				URL:     od.LocalInfo.URL,
@@ -355,4 +368,164 @@ func (o *orchestratorPool) Broadcaster() common.Broadcaster {
 
 func (o *orchestratorPool) pollOrchestratorInfo(ctx context.Context) {
 
+}
+
+// emitFrameworksDiscovery sends per-attempt discovery + per-instance state
+// events to FrameWorks Decklog. Called from getOrchInfo at the result/error
+// boundary so failed dials are durable. The state emission is per-instance
+// (resolved IP) — pricing/capabilities/hardware can legitimately differ
+// across instances of the same orch's load-balanced pool, so the receiving
+// table keys per IP, not per orch_addr. See
+// docs/architecture/orchestrator-visibility.md (in the monorepo).
+func emitFrameworksDiscovery(ctx context.Context, od common.OrchestratorDescriptor, info *net.OrchestratorInfo, err error, latency time.Duration) {
+	if od.LocalInfo == nil || od.LocalInfo.URL == nil {
+		return
+	}
+	urlStr := od.LocalInfo.URL.String()
+
+	// Orch eth address resolution, in priority order:
+	//   1. The info from THIS attempt (success path).
+	//   2. od.RemoteInfo, the cached info from the most recent prior
+	//      successful discovery in this pool — covers transient failures
+	//      (e.g., orch was up last cycle, blipped this cycle). The eth
+	//      address is stable across restarts so the previous one is
+	//      authoritative.
+	//   3. URL-derived synthetic id "url:<host>" — only used when this is
+	//      the first time we've ever seen the orch and it failed. Ingest keeps
+	//      those rows under the stable URL key; once this gateway has learned
+	//      an eth address, later failures use the eth-address key.
+	// This means once an orch has succeeded once, every subsequent failure
+	// attributes correctly against its hex address — no more orphan buckets.
+	orchAddr := ""
+	switch {
+	case info != nil && len(info.Address) > 0:
+		orchAddr = hexutil.Encode(info.Address)
+	case od.RemoteInfo != nil && len(od.RemoteInfo.Address) > 0:
+		orchAddr = hexutil.Encode(od.RemoteInfo.Address)
+	case od.LocalInfo != nil && od.LocalInfo.URL != nil:
+		orchAddr = "url:" + od.LocalInfo.URL.Host
+	}
+
+	reachable := err == nil && info != nil && info.Transcoder != ""
+	failureKind := ""
+	failureReason := ""
+	if err != nil {
+		failureReason = err.Error()
+		failureKind = classifyDiscoveryError(err)
+	} else if !reachable {
+		failureKind = "no_transcoder"
+		failureReason = "orchestrator returned empty transcoder URI"
+	}
+
+	frameworks.EmitDiscoveryObserved(
+		ctx,
+		orchAddr,
+		urlStr,
+		"", // advertisedNodeURL: filled at the top-level loop, not per-attempt
+		latency,
+		reachable,
+		true, // compatibility is decided downstream of getOrchInfo; default true here, the failure-on-incompat path doesn't reach this site
+		od.LocalInfo.Score,
+		failureReason,
+		failureKind,
+	)
+
+	// Successful response → per-instance state event (price/capabilities/
+	// hardware as observed from THIS instance behind the orch's DNS).
+	if reachable {
+		state := &fwpb.OrchestratorStateUpdate{
+			OrchAddr:           orchAddr,
+			CanonicalUrl:       info.Transcoder,
+			AdvertisedNodeUrls: append([]string(nil), info.Nodes...),
+			Source:             "gateway_pool",
+		}
+		if info.Capabilities != nil {
+			// Upstream caps is bitmask + version; we don't have the human-friendly
+			// names handy here. Encode the raw bitmask as a single-element
+			// "caps_v<version>:<hex>" string so downstream consumers can decode it.
+			state.Capabilities = capabilitiesToStrings(info.Capabilities)
+		}
+		if info.PriceInfo != nil {
+			state.PricePerUnit = info.PriceInfo.PricePerUnit
+			state.PixelsPerUnit = info.PriceInfo.PixelsPerUnit
+		}
+		if len(info.CapabilitiesPrices) > 0 {
+			state.CapabilityPriceEntries = capabilityPriceEntries(info.CapabilitiesPrices)
+		}
+		if len(info.Hardware) > 0 {
+			state.Hardware = hardwareSummary(info.Hardware)
+		}
+		frameworks.EmitStateUpdate(ctx, orchAddr, urlStr, state)
+	}
+}
+
+// classifyDiscoveryError maps a getOrchInfo error to a low-cardinality
+// failure_kind for periscope rollups. Coarse on purpose — fine-grained
+// classification is the caller's job via failure_reason.
+func classifyDiscoveryError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "no such host"), strings.Contains(msg, "dns"):
+		return "dns"
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "connect:"):
+		return "tcp"
+	case strings.Contains(msg, "rpc"), strings.Contains(msg, "grpc"):
+		return "rpc"
+	case strings.Contains(msg, "context canceled"):
+		return "canceled"
+	default:
+		return "other"
+	}
+}
+
+func capabilitiesToStrings(caps *net.Capabilities) []string {
+	if caps == nil {
+		return nil
+	}
+	out := make([]string, 0, len(caps.Bitstring))
+	for _, b := range caps.Bitstring {
+		out = append(out, strconv.FormatUint(b, 16))
+	}
+	return out
+}
+
+func capabilityPriceEntries(prices []*net.PriceInfo) []*fwpb.OrchestratorCapabilityPriceEntry {
+	if len(prices) == 0 {
+		return nil
+	}
+	out := make([]*fwpb.OrchestratorCapabilityPriceEntry, 0, len(prices))
+	for i, p := range prices {
+		if p == nil {
+			continue
+		}
+		// Upstream PriceInfo doesn't carry a capability id at this layer.
+		// Preserve position so consumers can correlate against the orch's
+		// capabilities array; capability name stays empty until upstream
+		// surfaces it.
+		out = append(out, &fwpb.OrchestratorCapabilityPriceEntry{
+			Position:      uint32(i),
+			PricePerUnit:  p.PricePerUnit,
+			PixelsPerUnit: p.PixelsPerUnit,
+		})
+	}
+	return out
+}
+
+func hardwareSummary(hw []*net.HardwareInformation) string {
+	if len(hw) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(hw))
+	for _, h := range hw {
+		if h == nil {
+			continue
+		}
+		parts = append(parts, h.Pipeline+"="+h.ModelId)
+	}
+	return strings.Join(parts, ",")
 }

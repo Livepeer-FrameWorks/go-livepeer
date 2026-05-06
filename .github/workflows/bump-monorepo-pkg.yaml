@@ -1,0 +1,113 @@
+# Refresh github.com/Livepeer-FrameWorks/monorepo/pkg when the monorepo
+# notifies this repository that a go-livepeer-imported package changed.
+#
+# This workflow runs `go get monorepo/pkg@<sha>`, removes the local-dev
+# replace directive (no-op if already removed), runs `go mod tidy`, and opens
+# or updates one rolling PR. It intentionally does not run `go build ./...`;
+# full compile/test coverage stays with normal PR/tag CI.
+
+name: Refresh monorepo/pkg
+
+on:
+  repository_dispatch:
+    types: [monorepo-pkg-changed]
+  workflow_dispatch:
+    inputs:
+      monorepo_sha:
+        description: "Monorepo commit SHA to pin (defaults to master tip)"
+        required: false
+        default: master
+
+concurrency:
+  group: refresh-monorepo-pkg
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify GitHub App credentials
+        env:
+          GITOPS_APP_ID: ${{ vars.GITOPS_APP_ID }}
+          HAS_GITOPS_APP_PRIVATE_KEY: ${{ secrets.GITOPS_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITOPS_APP_ID" ]; then
+            echo "::error::GITOPS_APP_ID is not available to the go-livepeer workflow. Add it as an org/repo variable for Livepeer-FrameWorks/go-livepeer."
+            exit 1
+          fi
+          if [ "$HAS_GITOPS_APP_PRIVATE_KEY" != "true" ]; then
+            echo "::error::GITOPS_APP_PRIVATE_KEY is not available to the go-livepeer workflow. Add it as an org/repo secret for Livepeer-FrameWorks/go-livepeer."
+            exit 1
+          fi
+      - name: Generate go-livepeer GitHub App token
+        id: go-livepeer-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          repositories: go-livepeer
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.go-livepeer-token.outputs.token }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve target SHA
+        id: target
+        env:
+          DISPATCH_SHA: ${{ github.event.client_payload.monorepo_sha }}
+          INPUT_SHA: ${{ github.event.inputs.monorepo_sha }}
+        run: |
+          if [ -n "$INPUT_SHA" ]; then
+            echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+          elif [ -n "$DISPATCH_SHA" ]; then
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=master" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Drop local-dev replace and pin pseudo-version
+        env:
+          GOPRIVATE: github.com/Livepeer-FrameWorks/*
+        run: |
+          set -euo pipefail
+          # Remove the local-dev replace if present. Idempotent — no-op when
+          # the line is already gone.
+          go mod edit -dropreplace=github.com/Livepeer-FrameWorks/monorepo/pkg
+          go get github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.target.outputs.sha }}
+          go mod tidy
+
+      - name: Capture pinned version
+        id: pinned
+        run: |
+          VER=$(go list -m github.com/Livepeer-FrameWorks/monorepo/pkg | awk '{print $2}')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.go-livepeer-token.outputs.token }}
+          branch: bot/bump-monorepo-pkg
+          delete-branch: true
+          title: "chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}"
+          commit-message: |
+            chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}
+
+            Triggered by ${{ github.event_name }} @ ${{ steps.target.outputs.sha }}.
+          body: |
+            Refresh `github.com/Livepeer-FrameWorks/monorepo/pkg`.
+
+            - Pinned: `github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.pinned.outputs.version }}`
+            - Local-dev `replace ../monorepo/pkg` removed (idempotent).
+            - `go mod tidy` clean.
+
+            Merge when preparing the next gateway release. Full compile/test coverage runs in normal PR/tag CI.
+          labels: |
+            dependencies
+            monorepo-pkg

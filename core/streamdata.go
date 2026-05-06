@@ -38,6 +38,15 @@ type StreamParameters struct {
 	Codec             ffmpeg.VideoCodec
 	PixelFormat       ffmpeg.PixelFormat
 	TimeoutMultiplier int // Used in the VOD workflow to allow us to be more lenient with timeouts
+
+	// FrameWorks tenant attribution propagated from Foghorn's auth-webhook
+	// response. Required for Decklog outcome telemetry when FrameWorks
+	// telemetry is enabled.
+	// (StreamID() is already a method returning Livepeer-internal manifest/key;
+	// FrameworksStreamID holds the public stream UUID and intentionally has a
+	// distinct name.)
+	TenantID           string
+	FrameworksStreamID string
 }
 
 func (s *StreamParameters) StreamID() string {

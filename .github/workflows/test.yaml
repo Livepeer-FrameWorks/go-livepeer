@@ -7,14 +7,12 @@ on:
   push:
     branches:
       - master
-    tags:
-      - "v*"
     paths-ignore:
       - 'doc/**'
       - 'docker/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,7 +45,7 @@ jobs:
           fetch-depth: 0
           # Check https://github.com/livepeer/go-livepeer/pull/1891
           # for ref value discussion
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Cleanup hosted runner
         run: |
@@ -110,8 +108,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.4.0
-          skip-pkg-cache: true
+          version: v2.9.0
           args: '--output.text.path=stdout --output.text.colors=true --output.text.print-issued-lines=true --default=none --enable=govet --timeout=4m pm verification'
 
       - name: Run Revive Action by building from repository
@@ -147,7 +144,7 @@ jobs:
         with:
           # Check https://github.com/livepeer/go-livepeer/pull/1891
           # for ref value discussion
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Install editorconfig-checker
         uses: editorconfig-checker/action-editorconfig-checker@main

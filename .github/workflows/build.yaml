@@ -5,14 +5,12 @@ on:
   push:
     branches:
       - master
-    tags:
-      - "v*"
     paths-ignore:
       - 'doc/**'
       - 'docker/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -64,7 +62,7 @@ jobs:
           fetch-depth: 0
           # Check https://github.com/livepeer/go-livepeer/pull/1891
           # for ref value discussion
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up go
         id: go
@@ -169,7 +167,7 @@ jobs:
           tar -czvf "../releases/$LP_BUILD_DIR.tar.gz" ./
 
       - name: Upload artifacts for cutting release
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-artifacts-${{ matrix.target.GOOS }}-${{ matrix.target.type }}-${{ matrix.target.GOARCH }}
           path: releases/
@@ -184,7 +182,7 @@ jobs:
           fetch-depth: 0
           # Check https://github.com/livepeer/go-livepeer/pull/1891
           # for ref value discussion
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up go
         id: go
