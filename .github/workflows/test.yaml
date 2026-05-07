@@ -110,8 +110,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.4.0
-          skip-pkg-cache: true
+          version: v2.9.0
           args: '--output.text.path=stdout --output.text.colors=true --output.text.print-issued-lines=true --default=none --enable=govet --timeout=4m pm verification'
 
       - name: Run Revive Action by building from repository
