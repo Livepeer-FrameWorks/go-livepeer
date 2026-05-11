@@ -1,22 +1,14 @@
-# Auto-bump github.com/Livepeer-FrameWorks/monorepo/pkg when the monorepo
-# pushes a change to master under pkg/. The monorepo's
-# .github/workflows/notify-go-livepeer-pkg-bump.yml dispatches the event.
+# Refresh github.com/Livepeer-FrameWorks/monorepo/pkg on demand before gateway
+# releases, with a weekly catch-up so the pin does not drift indefinitely.
 #
 # This workflow runs `go get monorepo/pkg@<sha>`, removes the local-dev
-# replace directive (no-op if already removed), runs `go mod tidy`, and
-# opens a PR. Merging the PR + tagging a release is still a human step —
-# the gateway's release cadence shouldn't be one-PR-per-monorepo-commit.
-#
-# Triggers:
-#   - repository_dispatch from monorepo (event-type: monorepo-pkg-changed)
-#   - workflow_dispatch (manual; useful before cutting a gateway release)
-#   - schedule (daily safety-net in case dispatch is missed)
+# replace directive (no-op if already removed), runs `go mod tidy`, and opens
+# or updates one rolling PR. It intentionally does not run `go build ./...`;
+# full compile/test coverage stays with normal PR/tag CI.
 
-name: Bump monorepo/pkg
+name: Refresh monorepo/pkg
 
 on:
-  repository_dispatch:
-    types: [monorepo-pkg-changed]
   workflow_dispatch:
     inputs:
       monorepo_sha:
@@ -24,7 +16,11 @@ on:
         required: false
         default: master
   schedule:
-    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+    - cron: "0 6 * * 1" # Weekly catch-up, Mondays 06:00 UTC
+
+concurrency:
+  group: refresh-monorepo-pkg
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -42,9 +38,7 @@ jobs:
       - name: Resolve target SHA
         id: target
         run: |
-          if [ -n "${{ github.event.client_payload.monorepo_sha }}" ]; then
-            echo "sha=${{ github.event.client_payload.monorepo_sha }}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ github.event.inputs.monorepo_sha }}" ]; then
+          if [ -n "${{ github.event.inputs.monorepo_sha }}" ]; then
             echo "sha=${{ github.event.inputs.monorepo_sha }}" >> "$GITHUB_OUTPUT"
           else
             echo "sha=master" >> "$GITHUB_OUTPUT"
@@ -60,7 +54,6 @@ jobs:
           go mod edit -dropreplace=github.com/Livepeer-FrameWorks/monorepo/pkg
           go get github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.target.outputs.sha }}
           go mod tidy
-          go build ./... >/dev/null
 
       - name: Capture pinned version
         id: pinned
@@ -73,19 +66,19 @@ jobs:
         with:
           branch: bot/bump-monorepo-pkg
           delete-branch: true
-          title: "bump: monorepo/pkg to ${{ steps.pinned.outputs.version }}"
+          title: "chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}"
           commit-message: |
-            bump: monorepo/pkg to ${{ steps.pinned.outputs.version }}
+            chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}
 
-            Triggered by monorepo push @ ${{ github.event.client_payload.monorepo_sha || github.event.inputs.monorepo_sha || 'master' }}.
+            Triggered by ${{ github.event_name }} @ ${{ github.event.inputs.monorepo_sha || 'master' }}.
           body: |
-            Auto-bump from `Livepeer-FrameWorks/monorepo` push.
+            Refresh `github.com/Livepeer-FrameWorks/monorepo/pkg`.
 
             - Pinned: `github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.pinned.outputs.version }}`
             - Local-dev `replace ../monorepo/pkg` removed (idempotent).
-            - `go mod tidy` + `go build ./...` clean.
+            - `go mod tidy` clean.
 
-            Merge when ready; tag a release after merge to land in the next monorepo release manifest fetch.
+            Merge when preparing the next gateway release. Full compile/test coverage runs in normal PR/tag CI.
           labels: |
             dependencies
             monorepo-pkg
