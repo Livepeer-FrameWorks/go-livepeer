@@ -1,5 +1,5 @@
-# Refresh github.com/Livepeer-FrameWorks/monorepo/pkg on demand before gateway
-# releases, with a weekly catch-up so the pin does not drift indefinitely.
+# Refresh github.com/Livepeer-FrameWorks/monorepo/pkg when the monorepo
+# notifies this repository that a go-livepeer-imported package changed.
 #
 # This workflow runs `go get monorepo/pkg@<sha>`, removes the local-dev
 # replace directive (no-op if already removed), runs `go mod tidy`, and opens
@@ -9,14 +9,14 @@
 name: Refresh monorepo/pkg
 
 on:
+  repository_dispatch:
+    types: [monorepo-pkg-changed]
   workflow_dispatch:
     inputs:
       monorepo_sha:
         description: "Monorepo commit SHA to pin (defaults to master tip)"
         required: false
         default: master
-  schedule:
-    - cron: "0 6 * * 1" # Weekly catch-up, Mondays 06:00 UTC
 
 concurrency:
   group: refresh-monorepo-pkg
@@ -37,9 +37,14 @@ jobs:
 
       - name: Resolve target SHA
         id: target
+        env:
+          DISPATCH_SHA: ${{ github.event.client_payload.monorepo_sha }}
+          INPUT_SHA: ${{ github.event.inputs.monorepo_sha }}
         run: |
-          if [ -n "${{ github.event.inputs.monorepo_sha }}" ]; then
-            echo "sha=${{ github.event.inputs.monorepo_sha }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_SHA" ]; then
+            echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+          elif [ -n "$DISPATCH_SHA" ]; then
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
           else
             echo "sha=master" >> "$GITHUB_OUTPUT"
           fi
@@ -70,7 +75,7 @@ jobs:
           commit-message: |
             chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}
 
-            Triggered by ${{ github.event_name }} @ ${{ github.event.inputs.monorepo_sha || 'master' }}.
+            Triggered by ${{ github.event_name }} @ ${{ steps.target.outputs.sha }}.
           body: |
             Refresh `github.com/Livepeer-FrameWorks/monorepo/pkg`.
 
