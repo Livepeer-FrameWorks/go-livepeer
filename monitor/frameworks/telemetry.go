@@ -75,7 +75,6 @@ func Init(ctx context.Context) error {
 		Target:        addr,
 		AllowInsecure: tlsMode != "mtls" && tlsMode != "tls",
 		CACertFile:    strings.TrimSpace(os.Getenv("GRPC_TLS_CA_PATH")),
-		ServerName:    strings.TrimSpace(os.Getenv("GRPC_TLS_SERVER_NAME")),
 		Source:        "livepeer-gateway",
 		ServiceToken:  authToken,
 		Timeout:       5 * time.Second,
