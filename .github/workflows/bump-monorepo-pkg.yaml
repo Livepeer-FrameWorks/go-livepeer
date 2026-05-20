@@ -30,7 +30,30 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
+      - name: Verify GitHub App credentials
+        env:
+          GITOPS_APP_ID: ${{ vars.GITOPS_APP_ID }}
+          HAS_GITOPS_APP_PRIVATE_KEY: ${{ secrets.GITOPS_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITOPS_APP_ID" ]; then
+            echo "::error::GITOPS_APP_ID is not available to the go-livepeer workflow. Add it as an org/repo variable for Livepeer-FrameWorks/go-livepeer."
+            exit 1
+          fi
+          if [ "$HAS_GITOPS_APP_PRIVATE_KEY" != "true" ]; then
+            echo "::error::GITOPS_APP_PRIVATE_KEY is not available to the go-livepeer workflow. Add it as an org/repo secret for Livepeer-FrameWorks/go-livepeer."
+            exit 1
+          fi
+      - name: Generate go-livepeer GitHub App token
+        id: go-livepeer-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          repositories: go-livepeer
       - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.go-livepeer-token.outputs.token }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -69,6 +92,7 @@ jobs:
       - name: Open PR
         uses: peter-evans/create-pull-request@v8
         with:
+          token: ${{ steps.go-livepeer-token.outputs.token }}
           branch: bot/bump-monorepo-pkg
           delete-branch: true
           title: "chore: refresh monorepo/pkg to ${{ steps.pinned.outputs.version }}"
