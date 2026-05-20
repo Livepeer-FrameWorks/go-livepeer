@@ -74,6 +74,8 @@ func Init(ctx context.Context) error {
 	cfg := decklog.BatchedClientConfig{
 		Target:        addr,
 		AllowInsecure: tlsMode != "mtls" && tlsMode != "tls",
+		CACertFile:    strings.TrimSpace(os.Getenv("GRPC_TLS_CA_PATH")),
+		ServerName:    strings.TrimSpace(os.Getenv("GRPC_TLS_SERVER_NAME")),
 		Source:        "livepeer-gateway",
 		ServiceToken:  authToken,
 		Timeout:       5 * time.Second,
@@ -115,11 +117,8 @@ func Enabled() bool {
 	return enabled
 }
 
-// SetDialedIP records the actual remote IP the gateway connected to for a
-// given orchestrator hostname. Called from the gRPC dial path (peer.Peer)
-// before discovery emission so the per-IP `dialed` flag attaches to the
-// IP that was really used, not the first sorted DNS result. No-op when
-// telemetry is disabled; the cache state is irrelevant in that case.
+// SetDialedIP records the remote IP the gateway connected to for a given
+// orchestrator hostname.
 func SetDialedIP(host, ip string) {
 	if !Enabled() {
 		return
