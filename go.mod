@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	contrib.go.opencensus.io/exporter/prometheus v0.4.2
-	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260525211440-b5f86c823b52
+	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260525213110-b4f260d92aac
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/bluenviron/gortsplib/v4 v4.12.3
 	github.com/bluenviron/mediacommon/v2 v2.4.0
