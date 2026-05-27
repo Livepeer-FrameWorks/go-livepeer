@@ -1019,6 +1019,11 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	// Do the transcoding!
 	urls, err := processSegment(ctx, cxn, seg, &segPar)
 	if err != nil {
+		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {
+			clog.Errorf(ctx, "No sessions available name=%s url=%s err=%q statusCode=%d", fname, r.URL, err, http.StatusServiceUnavailable)
+			http.Error(w, "No sessions available", http.StatusServiceUnavailable)
+			return
+		}
 		status := http.StatusInternalServerError
 		if isNonRetryableError(err) {
 			status = http.StatusUnprocessableEntity

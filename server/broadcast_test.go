@@ -855,11 +855,11 @@ func TestProcessSegment_MaxAttempts(t *testing.T) {
 	assert.Equal(1, transcodeCalls, "Segment submission calls did not match")
 	assert.Len(bsm.trustedPool.sessMap, 0)
 
-	// The session list is empty. TODO Should return an error indicating such
-	// (This test should fail and be corrected once this is actually implemented)
+	// The session list is empty. Surface that as a real error so callers can
+	// stop immediately instead of treating an empty output as success.
 	transcodeCalls = 0
 	_, err = processSegment(context.Background(), cxn, seg, nil)
-	assert.Nil(err)
+	assert.ErrorIs(err, errNoOrchs)
 	assert.Equal(0, transcodeCalls, "Segment submission calls did not match")
 	assert.Len(bsm.trustedPool.sessMap, 0)
 }
@@ -993,7 +993,7 @@ func TestProcessSegment_MetadataQueueTranscodeEvent(t *testing.T) {
 	// Empty session list. Transcode event should still have success=false
 	cxn.sessManager = bsmWithSessList([]*BroadcastSession{})
 	_, err = processSegment(context.Background(), cxn, seg, nil)
-	assert.Nil(err)
+	assert.ErrorIs(err, errNoOrchs)
 	assert.Len(cxn.sessManager.trustedPool.sessMap, 0)
 	evt, ok = queue.receive(ctx)
 	require.True(ok)
@@ -1001,7 +1001,8 @@ func TestProcessSegment_MetadataQueueTranscodeEvent(t *testing.T) {
 	transEvt = evt.data.(*data.TranscodeEvent)
 	assert.Equal(false, transEvt.Success)
 	assert.Equal(1, len(transEvt.Attempts))
-	assert.Nil(transEvt.Attempts[0].Error)
+	require.NotNil(transEvt.Attempts[0].Error)
+	assert.Equal(errNoOrchs.Error(), *transEvt.Attempts[0].Error)
 
 	// Should not fail processing on queue error
 	queue.err = errors.New("publish failure")
