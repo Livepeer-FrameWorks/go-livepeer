@@ -756,6 +756,18 @@ func (bsm *BroadcastSessionsManager) usingVerified() bool {
 	return bsm.verifiedSession != nil
 }
 
+func (bsm *BroadcastSessionsManager) hasOrchestratorPool() bool {
+	if bsm == nil {
+		return false
+	}
+	bsm.sessLock.Lock()
+	defer bsm.sessLock.Unlock()
+	return bsm.trustedPool.poolSize > 0 ||
+		bsm.untrustedPool.poolSize > 0 ||
+		bsm.trustedPool.numOrchs > 0 ||
+		bsm.untrustedPool.numOrchs > 0
+}
+
 func selectOrchestrator(ctx context.Context, n *core.LivepeerNode, params *core.StreamParameters, count int, sus *suspender,
 	scorePred common.ScorePred, cleanupSession sessionsCleanup) ([]*BroadcastSession, error) {
 
@@ -976,6 +988,10 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 			break
 		}
 
+		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {
+			clog.Warningf(ctx, "Not retrying current segment because no orchestrator session is available err=%q", err)
+			break
+		}
 		if shouldStopStream(err) {
 			clog.Warningf(ctx, "Stopping current stream due to err=%q", err)
 			rtmpStrm.Close()
@@ -1044,14 +1060,16 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	// Return early under a few circumstances:
 	// View-only (non-transcoded) streams or no sessions available
 	if len(sessions) == 0 {
+		if !cxn.sessManager.hasOrchestratorPool() {
+			clog.Infof(ctx, "No sessions available because no orchestrators were configured; not transcoding")
+			return nil, info, nil
+		}
+		err = errNoOrchs
 		if monitor.Enabled {
-			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorNoOrchestrators, nonce, seg.SeqNo, errNoOrchs, true)
+			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorNoOrchestrators, nonce, seg.SeqNo, err, true)
 		}
 		clog.Infof(ctx, "No sessions available for segment")
-		// We may want to introduce a "non-retryable" error type here
-		// would help error propagation for live ingest.
-		// similar to the orchestrator's RemoteTranscoderFatalError
-		return nil, info, nil
+		return nil, info, err
 	}
 	info.Orchestrator = data.OrchestratorMetadata{
 		TranscoderUri: sessions[0].Transcoder(),

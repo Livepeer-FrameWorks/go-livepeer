@@ -233,7 +233,7 @@ func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) 
 	s.HTTPMux.Handle("/healthz", s.healthzHandler())
 
 	//LPMS handlers for handling RTMP video
-	s.LPMS.HandleRTMPPublish(createRTMPStreamIDHandler(ctx, s, nil), gotRTMPStreamHandler(s), endRTMPStreamHandler(s))
+	s.LPMS.HandleRTMPPublish(createRTMPStreamIDHandler(ctx, s, nil, ""), gotRTMPStreamHandler(s), endRTMPStreamHandler(s))
 	s.LPMS.HandleRTMPPlay(getRTMPStreamHandler(s))
 
 	//LPMS handler for handling HLS video play
@@ -269,7 +269,7 @@ func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) 
 }
 
 // RTMP Publish Handlers
-func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, webhookResponseOverride *authWebhookResponse) func(url *url.URL) (strmID stream.AppData, e error) {
+func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHeaderConfig *authWebhookResponse, contentResolution string) func(url *url.URL) (strmID stream.AppData, e error) {
 	return func(url *url.URL) (strmID stream.AppData, e error) {
 		//Check HTTP header for ManifestID
 		//If ManifestID is passed in HTTP header, use that one
@@ -292,23 +292,13 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, webhookR
 
 		// do not replace captured _ctx variable
 		ctx := clog.AddNonce(_ctx, nonce)
-		if resp, err = authenticateStream(AuthWebhookURL, url.String()); err != nil {
+		if resp, err = authenticateStream(AuthWebhookURL, url.String(), authHeaderConfig, contentResolution); err != nil {
 			clog.Errorf(ctx, fmt.Sprintf("Forbidden: Authentication denied for streamID url=%s err=%q", url.String(), err))
 			return nil, errForbidden
 		}
 
-		// If we've received auth in header AND callback URL forms then for now, we reject cases where they're
-		// trying to give us different profiles
-		if resp != nil && webhookResponseOverride != nil {
-			if !resp.areProfilesEqual(*webhookResponseOverride) {
-				clog.Errorf(ctx, "Received auth header with profiles that don't match those in callback URL response")
-				return nil, fmt.Errorf("Received auth header with profiles that don't match those in callback URL response")
-			}
-		}
-
-		// If we've received a header containing auth values then let those override any from a callback URL
-		if webhookResponseOverride != nil {
-			resp = webhookResponseOverride
+		if resp == nil && authHeaderConfig != nil {
+			resp = authHeaderConfig
 		}
 
 		if resp != nil {
@@ -880,7 +870,7 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 
 	// Check for presence and register if a fresh cxn
 	if !exists {
-		appData, err := (createRTMPStreamIDHandler(ctx, s, authHeaderConfig))(r.URL)
+		appData, err := (createRTMPStreamIDHandler(ctx, s, authHeaderConfig, r.Header.Get("Content-Resolution")))(r.URL)
 		if err != nil {
 			if errors.Is(err, errForbidden) {
 				errorOut(http.StatusForbidden, "Could not create stream ID: url=%s", r.URL)
@@ -1047,6 +1037,11 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	// Do the transcoding!
 	urls, err := processSegment(ctx, cxn, seg, &segPar)
 	if err != nil {
+		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {
+			clog.Errorf(ctx, "No sessions available name=%s url=%s err=%q statusCode=%d", fname, r.URL, err, http.StatusServiceUnavailable)
+			http.Error(w, "No sessions available", http.StatusServiceUnavailable)
+			return
+		}
 		status := http.StatusInternalServerError
 		if isNonRetryableError(err) {
 			status = http.StatusUnprocessableEntity
@@ -1356,7 +1351,7 @@ func (s *LivepeerServer) HandleRecordings(w http.ResponseWriter, r *http.Request
 	if cresp, has := s.recordingsAuthResponses.Get(manifestID); has {
 		resp = cresp.(*authWebhookResponse)
 		fromCache = true
-	} else if resp, err = authenticateStream(AuthWebhookURL, r.URL.String()); err != nil {
+	} else if resp, err = authenticateStream(AuthWebhookURL, r.URL.String(), nil, ""); err != nil {
 		glog.Errorf("Authentication denied for url=%s err=%q", r.URL.String(), err)
 		if strings.Contains(err.Error(), "not found") {
 			w.WriteHeader(http.StatusNotFound)

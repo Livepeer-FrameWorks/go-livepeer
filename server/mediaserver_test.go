@@ -414,7 +414,7 @@ func TestCreateRTMPStreamHandlerCap(t *testing.T) {
 		connectionLock:  &sync.RWMutex{},
 		rtmpConnections: make(map[core.ManifestID]*rtmpConnection),
 	}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 	u := mustParseUrl(t, "http://hot/id1/secret")
 	oldMaxSessions := core.MaxSessions
 	core.MaxSessions = 1
@@ -440,7 +440,9 @@ func TestCreateRTMPStreamHandlerCap(t *testing.T) {
 }
 
 type authWebhookReq struct {
-	URL string `json:"url"`
+	URL               string               `json:"url"`
+	Profiles          []ffmpeg.JsonProfile `json:"profiles,omitempty"`
+	ContentResolution string               `json:"contentResolution,omitempty"`
 }
 
 func TestCreateRTMPStreamHandlerWebhook(t *testing.T) {
@@ -449,7 +451,7 @@ func TestCreateRTMPStreamHandlerWebhook(t *testing.T) {
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 
 	AuthWebhookURL = mustParseUrl(t, "http://localhost:8938/notexisting")
 	u := mustParseUrl(t, "http://hot/something/id1")
@@ -457,10 +459,10 @@ func TestCreateRTMPStreamHandlerWebhook(t *testing.T) {
 	assert.Error(err)
 	assert.Nil(sid, "Webhook auth failed")
 
+	var gotReq authWebhookReq
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, _ := ioutil.ReadAll(r.Body)
-		var req authWebhookReq
-		err := json.Unmarshal(out, &req)
+		err := json.Unmarshal(out, &gotReq)
 		if err != nil {
 			fmt.Printf("Error parsing URL: %v\n", err)
 			w.WriteHeader(http.StatusForbidden)
@@ -690,7 +692,7 @@ func TestCreateRTMPStreamHandler(t *testing.T) {
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
 	handler := gotRTMPStreamHandler(s)
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 	endHandler := endRTMPStreamHandler(s)
 	// Test default path structure
 	expectedSid := core.MakeStreamIDFromString("ghijkl", "secretkey")
@@ -794,10 +796,10 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 	}
 	defer func() { common.RandomIDGenerator = oldRandFunc }()
 
+	var gotReq authWebhookReq
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out, _ := ioutil.ReadAll(r.Body)
-		var req authWebhookReq
-		err := json.Unmarshal(out, &req)
+		err := json.Unmarshal(out, &gotReq)
 		if err != nil {
 			fmt.Printf("Error parsing URL: %v\n", err)
 			w.WriteHeader(http.StatusForbidden)
@@ -805,7 +807,7 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 		}
 
 		j, err := json.Marshal(authWebhookResponse{
-			ManifestID: "!!!!!Should be overridden!!!!",
+			ManifestID: "callback-manifest-id",
 			Profiles:   profiles,
 		})
 		require.NoError(t, err)
@@ -823,10 +825,10 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 	createSid := createRTMPStreamIDHandler(context.TODO(), s, &authWebhookResponse{
 		ManifestID: "override-manifest-id",
 		Profiles:   profiles,
-	})
+	}, "2718x1750")
 
 	// Test default path structure
-	expectedSid := core.MakeStreamIDFromString("override-manifest-id", "abcdef")
+	expectedSid := core.MakeStreamIDFromString("callback-manifest-id", "abcdef")
 	u := mustParseUrl(t, "rtmp://localhost/"+expectedSid.String()) // with key
 
 	sid, err := createSid(u)
@@ -839,11 +841,11 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 	require.Equal(t, "P144p30fps16x9", sap.Profiles[0].Name)
 	require.Equal(t, "256x144", sap.Profiles[0].Resolution)
 	require.Equal(t, "400000", sap.Profiles[0].Bitrate)
+	require.Equal(t, profiles, gotReq.Profiles)
+	require.Equal(t, "2718x1750", gotReq.ContentResolution)
 }
 
-// Test that when an Auth header is present, we get an error response if the Profiles it provides
-// are different to those that come from the Callback URL
-func TestCreateRTMPStreamHandlerWithAuthHeader_DifferentProfilesToCallbackURL(t *testing.T) {
+func TestCreateRTMPStreamHandlerWithAuthHeader_UsesCallbackProfiles(t *testing.T) {
 	// Monkey patch rng to avoid unpredictability even when seeding
 	oldRandFunc := common.RandomIDGenerator
 	common.RandomIDGenerator = func(length uint) string {
@@ -894,15 +896,18 @@ func TestCreateRTMPStreamHandlerWithAuthHeader_DifferentProfilesToCallbackURL(t 
 				Height:  144,
 			},
 		},
-	})
+	}, "")
 
 	// Test default path structure
-	expectedSid := core.MakeStreamIDFromString("override-manifest-id", "abcdef")
+	expectedSid := core.MakeStreamIDFromString("!!!!!Should be overridden!!!!", "abcdef")
 	u := mustParseUrl(t, "rtmp://localhost/"+expectedSid.String()) // with key
 
 	sid, err := createSid(u)
-	require.Error(t, err)
-	require.Nil(t, sid)
+	require.NoError(t, err)
+	require.NotNil(t, sid)
+	sap := sid.(*core.StreamParameters)
+	require.Len(t, sap.Profiles, 1)
+	require.Equal(t, "This is different", sap.Profiles[0].Name)
 }
 
 func TestEndRTMPStreamHandler(t *testing.T) {
@@ -910,7 +915,7 @@ func TestEndRTMPStreamHandler(t *testing.T) {
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 	handler := gotRTMPStreamHandler(s)
 	endHandler := endRTMPStreamHandler(s)
 	u := mustParseUrl(t, "rtmp://localhost")
@@ -1022,7 +1027,7 @@ func TestMultiStream(t *testing.T) {
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
 	handler := gotRTMPStreamHandler(s)
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 
 	handleStream := func(i int) {
 		u := mustParseUrl(t, fmt.Sprintf("rtmp://localhost/%d", i))
@@ -1253,7 +1258,7 @@ func TestBroadcastSessionManagerWithStreamStartStop(t *testing.T) {
 
 	// create RTMPStream handler methods
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil)
+	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
 	handler := gotRTMPStreamHandler(s)
 	endHandler := endRTMPStreamHandler(s)
 
