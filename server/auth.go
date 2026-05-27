@@ -12,19 +12,33 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/lpms/ffmpeg"
 )
 
 const LIVERPEER_TRANSCODE_CONFIG_HEADER = "Livepeer-Transcode-Configuration"
 
-// Call a webhook URL, passing the request URL we received
-// Based on the response, we can authenticate and confirm whether to accept an incoming stream
-func authenticateStream(authURL *url.URL, incomingRequestURL string) (*authWebhookResponse, error) {
+type authWebhookRequest struct {
+	URL               string               `json:"url"`
+	Profiles          []ffmpeg.JsonProfile `json:"profiles,omitempty"`
+	ContentResolution string               `json:"contentResolution,omitempty"`
+}
+
+// Call a webhook URL, passing the request URL and Mist-provided transcode
+// context. The webhook is the single authority that accepts or rejects profiles.
+func authenticateStream(authURL *url.URL, incomingRequestURL string, transcodeConfig *authWebhookResponse, contentResolution string) (*authWebhookResponse, error) {
 	if authURL == nil {
 		return nil, nil
 	}
 	started := time.Now()
 
-	jsonValue, err := json.Marshal(map[string]string{"url": incomingRequestURL})
+	req := authWebhookRequest{
+		URL:               incomingRequestURL,
+		ContentResolution: contentResolution,
+	}
+	if transcodeConfig != nil && len(transcodeConfig.Profiles) > 0 {
+		req.Profiles = transcodeConfig.Profiles
+	}
+	jsonValue, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
