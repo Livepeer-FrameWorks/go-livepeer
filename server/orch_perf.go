@@ -57,10 +57,10 @@ local ttl = tonumber(ARGV[5])
 local now = tonumber(ARGV[6])
 local curXc = tonumber(redis.call('HGET', key, 'xcode_ewma'))
 if curXc == nil then
-  redis.call('HSET', key, 'xcode_ewma', xc, 'rtt_ewma', rtt)
+	redis.call('HSET', key, 'xcode_ewma', xc, 'rtt_ewma', rtt)
 else
-  local curRtt = tonumber(redis.call('HGET', key, 'rtt_ewma')) or rtt
-  redis.call('HSET', key, 'xcode_ewma', alpha*xc + (1-alpha)*curXc, 'rtt_ewma', alpha*rtt + (1-alpha)*curRtt)
+	local curRtt = tonumber(redis.call('HGET', key, 'rtt_ewma')) or rtt
+	redis.call('HSET', key, 'xcode_ewma', alpha*xc + (1-alpha)*curXc, 'rtt_ewma', alpha*rtt + (1-alpha)*curRtt)
 end
 redis.call('HSET', key, 'service_addr', ARGV[7], 'payment_recipient', ARGV[8], 'resolved_ip', ARGV[9])
 redis.call('HINCRBY', key, 'samples', 1)
