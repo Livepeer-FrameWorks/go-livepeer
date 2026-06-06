@@ -103,6 +103,35 @@ func TestSetChainID(t *testing.T) {
 	assert.Equal(chainID, expectedChainIDInt)
 }
 
+func TestNetworkCapabilitiesSnapshot(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	dbh, dbraw, err := TempDB(t)
+	require.Nil(err)
+	defer dbh.Close()
+	defer dbraw.Close()
+
+	// No snapshot yet -> empty string, no error.
+	got, err := dbh.SelectNetworkCapabilitiesSnapshot()
+	assert.Nil(err)
+	assert.Equal("", got)
+
+	// Round-trips an opaque JSON blob.
+	want := `{"schema_version":1,"chain_id":"1","orchestrators":[]}`
+	require.Nil(dbh.UpdateNetworkCapabilitiesSnapshot(want))
+	got, err = dbh.SelectNetworkCapabilitiesSnapshot()
+	assert.Nil(err)
+	assert.Equal(want, got)
+
+	// Overwrites in place.
+	want2 := `{"schema_version":1,"chain_id":"2"}`
+	require.Nil(dbh.UpdateNetworkCapabilitiesSnapshot(want2))
+	got, err = dbh.SelectNetworkCapabilitiesSnapshot()
+	assert.Nil(err)
+	assert.Equal(want2, got)
+}
+
 func TestDBLastSeenBlock(t *testing.T) {
 	dbh, dbraw, err := TempDB(t)
 	if err != nil {

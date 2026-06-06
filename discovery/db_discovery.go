@@ -8,9 +8,12 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/go-livepeer/clog"
 	"github.com/livepeer/go-livepeer/common"
@@ -44,6 +47,45 @@ type DBOrchestratorPoolCache struct {
 	ignoreCapacityCheck   bool
 	useDiscoveryEndpoint  bool
 	node                  *core.LivepeerNode
+	network               string // stamped into the persisted discovery snapshot
+	region                string // FRAMEWORKS_GATEWAY_REGION, for snapshot scoping
+
+	// Discovery freshness, guarded by mu. usableOrchCount feeds the readiness
+	// gate; refreshed reports whether at least one live refresh has completed.
+	mu                    sync.RWMutex
+	lastSuccessfulRefresh time.Time
+	lastOrchCount         int
+	usableOrchCount       int
+	refreshed             bool
+}
+
+// UsableOrchCount returns the number of currently-selectable orchestrators as
+// of the last successful refresh, and whether any refresh has completed yet.
+// Callers (e.g. the /healthz readiness gate) should fall back to a live lookup
+// when refreshed is false. It is cheap and lock-only — no DB access.
+func (dbo *DBOrchestratorPoolCache) UsableOrchCount() (count int, refreshed bool) {
+	dbo.mu.RLock()
+	defer dbo.mu.RUnlock()
+	return dbo.usableOrchCount, dbo.refreshed
+}
+
+// LastDiscoveryRefresh returns the time of the last successful non-empty
+// refresh and the selectable orch count at that time, for observability.
+func (dbo *DBOrchestratorPoolCache) LastDiscoveryRefresh() (time.Time, int) {
+	dbo.mu.RLock()
+	defer dbo.mu.RUnlock()
+	return dbo.lastSuccessfulRefresh, dbo.lastOrchCount
+}
+
+// snapshotExpired reports whether the last successful refresh is older than the
+// selection horizon. Used to decide whether an empty refresh may clear caps.
+func (dbo *DBOrchestratorPoolCache) snapshotExpired(now time.Time) bool {
+	dbo.mu.RLock()
+	defer dbo.mu.RUnlock()
+	if dbo.lastSuccessfulRefresh.IsZero() {
+		return true
+	}
+	return now.Sub(dbo.lastSuccessfulRefresh) > discoverySnapshotMaxAge
 }
 
 type orchPollingInfo struct {
@@ -73,6 +115,22 @@ type DBOrchestratorPoolCacheConfig struct {
 	LiveAICapReportInterval time.Duration
 	IgnoreCapacityCheck     bool
 	UseDiscoveryEndpoint    bool
+	// AsyncInitialDiscovery binds the HTTP listener immediately by running the
+	// initial discovery crawl in the background (with self-healing retry)
+	// instead of blocking startup until it completes.
+	AsyncInitialDiscovery bool
+	// Network is stamped into the persisted discovery snapshot so a snapshot
+	// from another network is never hydrated.
+	Network string
+	// HydratedAt is the CapturedAt of a snapshot that was hydrated into the node
+	// before this cache was built. It seeds lastSuccessfulRefresh so an early
+	// empty live refresh treats the hydrated caps as fresh (and doesn't clear
+	// them) until either a real refresh succeeds or the snapshot ages out.
+	HydratedAt time.Time
+	// HydratedOrchCount is the snapshot's selectable orchestrator count. It keeps
+	// LastDiscoveryRefresh aligned with the readiness/selection count until live
+	// discovery replaces it.
+	HydratedOrchCount int
 }
 
 func (cfg DBOrchestratorPoolCacheConfig) New() (*DBOrchestratorPoolCache, error) {
@@ -92,6 +150,18 @@ func (cfg DBOrchestratorPoolCacheConfig) New() (*DBOrchestratorPoolCache, error)
 		ignoreCapacityCheck:   cfg.IgnoreCapacityCheck,
 		useDiscoveryEndpoint:  cfg.UseDiscoveryEndpoint,
 		node:                  node,
+		network:               cfg.Network,
+		region:                strings.TrimSpace(os.Getenv("FRAMEWORKS_GATEWAY_REGION")),
+	}
+
+	// If the node was hydrated from a snapshot before this cache was built, seed
+	// the freshness state from the snapshot's capture time. This keeps the
+	// hydrated caps from being wiped by the first empty live refresh (via
+	// snapshotExpired) and surfaces a sensible LastDiscoveryRefresh until live
+	// discovery replaces it. Safe without a lock: no goroutine has started yet.
+	if !cfg.HydratedAt.IsZero() {
+		dbo.lastSuccessfulRefresh = cfg.HydratedAt
+		dbo.lastOrchCount = cfg.HydratedOrchCount
 	}
 
 	cacheOrchestrators := func() error {
@@ -109,12 +179,31 @@ func (cfg DBOrchestratorPoolCacheConfig) New() (*DBOrchestratorPoolCache, error)
 		return nil
 	}
 
-	if node.OrchestratorPool != nil {
-		// We already have Orchestrator Pool, so we're fine caching in the background and not delay the startup
+	if node.OrchestratorPool != nil || cfg.AsyncInitialDiscovery {
+		// Don't block startup: bind the listener immediately and crawl in the
+		// background. Retry the full chain with bounded backoff until it reaches
+		// pollOrchestratorInfo and installs the refresh ticker — otherwise an
+		// early discovery error (e.g. one bad eth RPC) would never reach the
+		// ticker and permanently wedge a not-ready node.
 		go func() {
-			err := cacheOrchestrators()
-			if err != nil {
-				clog.Errorf(context.Background(), "Error caching orchestrators: %v", err)
+			bo := backoff.NewExponentialBackOff()
+			bo.MaxInterval = 2 * time.Minute
+			bo.MaxElapsedTime = 0 // retry until success or ctx cancellation
+			for {
+				if cfg.Ctx.Err() != nil {
+					return
+				}
+				if err := cacheOrchestrators(); err == nil {
+					// Ticker is now running; periodic refresh self-heals from here.
+					return
+				} else {
+					clog.Errorf(cfg.Ctx, "Initial orchestrator discovery failed, retrying: %v", err)
+				}
+				select {
+				case <-cfg.Ctx.Done():
+					return
+				case <-time.After(bo.NextBackOff()):
+				}
 			}
 		}()
 	} else {
@@ -126,12 +215,7 @@ func (cfg DBOrchestratorPoolCacheConfig) New() (*DBOrchestratorPoolCache, error)
 }
 
 func (dbo *DBOrchestratorPoolCache) getURLs() ([]*url.URL, error) {
-	orchs, err := dbo.store.SelectOrchs(
-		&common.DBOrchFilter{
-			CurrentRound:   dbo.rm.LastInitializedRound(),
-			UpdatedLastDay: true,
-		},
-	)
+	orchs, err := dbo.selectableOrchs()
 	if err != nil || len(orchs) <= 0 {
 		return nil, err
 	}
@@ -331,10 +415,12 @@ func (dbo *DBOrchestratorPoolCache) cacheOrchInfos() error {
 	if dbo.node.OrchestratorPool != nil {
 		orchs = dbo.node.OrchestratorPool.GetInfos()
 		glog.Infof("Using orchestrator pool with %d orchestrators", len(orchs))
-	} else {
-		// Orchestrator pool set to use DBOrchestratorPoolCache after initial polling
-		// of OrchestratorInfo runs.  Fall back to using DB orchestrators from the registered
-		// orchestrators in the DB.
+	}
+	if len(orchs) == 0 {
+		// Pool is nil, or it returned nothing yet (e.g. during async initial
+		// discovery, before the DB cache pool is wired up / populated). Fall
+		// back to the registered orchestrators in the DB so the crawl always
+		// has targets rather than polling zero orchestrators.
 		dbOrchs, err := dbo.store.SelectOrchs(
 			&common.DBOrchFilter{
 				CurrentRound: dbo.rm.LastInitializedRound(),
@@ -513,13 +599,99 @@ func (dbo *DBOrchestratorPoolCache) cacheOrchInfos() error {
 		}
 	}
 
-	// Save network capabilities in LivepeerNode
-	dbo.node.UpdateNetworkCapabilities(orchNetworkCapabilities)
+	now := time.Now()
+	// Save network capabilities in LivepeerNode. Don't let a transient all-fail
+	// refresh wipe hydrated/last-known caps (which would flip /healthz to 503):
+	// only replace non-empty caps with an empty result once the last good
+	// refresh is older than the selection horizon.
+	if len(orchNetworkCapabilities) > 0 || dbo.snapshotExpired(now) {
+		dbo.node.UpdateNetworkCapabilities(orchNetworkCapabilities)
+	}
+
+	// On a successful, non-empty refresh: record freshness/readiness counters
+	// and persist a snapshot so a restart can hydrate before discovery completes.
+	if len(orchNetworkCapabilities) > 0 {
+		dbo.recordRefresh(now, orchNetworkCapabilities)
+	}
 
 	// Report AI container capacity metrics
 	reportAICapacityFromNetworkCapabilities(orchNetworkCapabilities)
 
 	return nil
+}
+
+// selectableOrchs returns the orchestrators serving discovery would currently
+// select — the same filter getURLs uses. The persisted snapshot and the
+// usable-orch readiness count are both built from this so they never claim more
+// than selection can actually use.
+func (dbo *DBOrchestratorPoolCache) selectableOrchs() ([]*common.DBOrch, error) {
+	return dbo.store.SelectOrchs(
+		&common.DBOrchFilter{
+			CurrentRound:   dbo.rm.LastInitializedRound(),
+			UpdatedLastDay: true,
+		},
+	)
+}
+
+// recordRefresh updates freshness/readiness counters and best-effort persists a
+// snapshot after a successful non-empty discovery refresh.
+func (dbo *DBOrchestratorPoolCache) recordRefresh(now time.Time, caps []*common.OrchNetworkCapabilities) {
+	selectable, err := dbo.selectableOrchs()
+	if err != nil {
+		glog.Errorf("discovery: could not read selectable orchestrators for snapshot: %v", err)
+		selectable = nil
+	}
+
+	dbo.mu.Lock()
+	dbo.lastSuccessfulRefresh = now
+	dbo.lastOrchCount = len(selectable)
+	dbo.usableOrchCount = len(selectable)
+	dbo.refreshed = true
+	dbo.mu.Unlock()
+
+	if monitor.Enabled {
+		monitor.DiscoveryRefresh(now, len(selectable))
+	}
+
+	dbo.persistSnapshot(now, selectable, caps)
+}
+
+// persistSnapshot writes an identity-stamped snapshot to the local DB. It is
+// best-effort: failures are logged, never fatal, and never overwrite a good
+// snapshot with an empty one (callers only invoke it on a non-empty refresh).
+func (dbo *DBOrchestratorPoolCache) persistSnapshot(now time.Time, orchs []*common.DBOrch, caps []*common.OrchNetworkCapabilities) {
+	db := dbo.node.Database
+	if db == nil {
+		return
+	}
+	var chainID string
+	if id, err := db.ChainID(); err != nil {
+		glog.Errorf("discovery: skipping snapshot persist, could not read chainID: %v", err)
+		return
+	} else if id != nil {
+		chainID = id.String()
+	}
+	var broadcaster string
+	if dbo.bcast != nil {
+		broadcaster = dbo.bcast.Address().Hex()
+	}
+	// Identity is the safety boundary for hydration: a snapshot with an unknown
+	// chain/network/gateway can never be trusted on load, so don't write one.
+	// Skip (and log) rather than persisting a snapshot that validation will
+	// silently reject later.
+	if chainID == "" || dbo.network == "" || broadcaster == "" {
+		glog.Warningf("discovery: skipping snapshot persist, incomplete identity (chain=%q network=%q broadcaster=%q)", chainID, dbo.network, broadcaster)
+		return
+	}
+	snap := newDiscoverySnapshot(chainID, dbo.network, broadcaster, dbo.region, now, orchs, caps)
+	raw, err := marshalDiscoverySnapshot(snap)
+	if err != nil {
+		glog.Errorf("discovery: could not marshal snapshot: %v", err)
+		return
+	}
+	if err := db.UpdateNetworkCapabilitiesSnapshot(raw); err != nil {
+		glog.Errorf("discovery: could not persist snapshot: %v", err)
+	}
 }
 
 func reportAICapacityFromNetworkCapabilities(orchNetworkCapabilities []*common.OrchNetworkCapabilities) {

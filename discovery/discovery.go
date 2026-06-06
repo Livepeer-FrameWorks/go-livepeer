@@ -23,7 +23,7 @@ import (
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/server"
 
-	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto"
+	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
 )
 
 var getOrchestratorTimeoutLoop = 3 * time.Second

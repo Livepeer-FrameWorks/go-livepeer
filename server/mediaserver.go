@@ -43,6 +43,7 @@ import (
 	"github.com/livepeer/lpms/vidplayer"
 	"github.com/livepeer/m3u8"
 	"github.com/patrickmn/go-cache"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -94,6 +95,25 @@ type rtmpConnection struct {
 	transcodedBytes uint64
 	mu              sync.Mutex
 	mediaFormat     ffmpeg.MediaFormatInfo
+
+	// Idempotency for duplicate/retried segment pushes keyed by (SeqNo, payload
+	// hash). segDedup coalesces concurrent in-flight pushes of the same segment
+	// bytes into a single transcode; segCache returns the rendition URLs of a
+	// recently-completed segment so a retry arriving after completion does not
+	// start a second transcode (which would poison session state). A same-seq
+	// push carrying *different* bytes is a protocol anomaly and is rejected (see
+	// segSeen / claimSeq), not served a stale result or joined to the wrong
+	// in-flight transcode.
+	segDedup    singleflight.Group
+	segCacheMu  sync.Mutex
+	segCache    map[uint64]cachedSeg
+	segCacheSeq []uint64
+	// segSeen records the first payload hash observed for an in-flight sequence
+	// number so a same-seq push carrying different bytes (a protocol anomaly:
+	// MistProcLivepeer keyNo is monotonic and never reused) is rejected rather
+	// than transcoded into a conflicting duplicate.
+	segSeen      map[uint64]uint64
+	segSeenOrder []uint64
 }
 
 func (s *LivepeerServer) getActiveRtmpConnectionUnsafe(mid core.ManifestID) (*rtmpConnection, bool) {
@@ -159,6 +179,13 @@ type authWebhookResponse struct {
 	// TenantID is the FrameWorks tenant the stream belongs to. Foghorn's
 	// livepeer auth webhook sets it for Decklog outcome telemetry.
 	TenantID string `json:"tenantID,omitempty"`
+	// Workload-aware transcode contract. MistProcLivepeer sets these so the
+	// gateway owns the deadline/selection/retry policy instead of the client.
+	// Workload is "live" or "vod"; DeadlineMs is the gateway response budget;
+	// MinSpeed is the minimum sustained speed factor tolerated for vod.
+	Workload   string  `json:"workload,omitempty"`
+	DeadlineMs int     `json:"deadlineMs,omitempty"`
+	MinSpeed   float64 `json:"minSpeed,omitempty"`
 }
 
 func NewLivepeerServer(ctx context.Context, rtmpAddr string, lpNode *core.LivepeerNode, httpIngest bool, transcodingOptions string) (*LivepeerServer, error) {
@@ -883,6 +910,9 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 		params := streamParams(appData)
 		if authHeaderConfig != nil {
 			params.TimeoutMultiplier = authHeaderConfig.TimeoutMultiplier
+			params.Workload = authHeaderConfig.Workload
+			params.DeadlineMs = authHeaderConfig.DeadlineMs
+			params.MinSpeed = authHeaderConfig.MinSpeed
 		}
 		params.Resolution = r.Header.Get("Content-Resolution")
 		params.Format = format
@@ -1034,8 +1064,10 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	cxn.mu.Unlock()
 
-	// Do the transcoding!
-	urls, err := processSegment(ctx, cxn, seg, &segPar)
+	// Do the transcoding! Deduplicated by (SeqNo, payload hash) so a duplicate or
+	// retried push of the same bytes joins the in-flight transcode or returns the
+	// cached result, while a same-seq push of different bytes is rejected.
+	urls, err := cxn.processSegmentDeduped(ctx, seg, &segPar)
 	if err != nil {
 		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {
 			clog.Errorf(ctx, "No sessions available name=%s url=%s err=%q statusCode=%d", fname, r.URL, err, http.StatusServiceUnavailable)
@@ -1663,6 +1695,14 @@ func (s *LivepeerServer) GetNodeStatus() *common.NodeStatus {
 		for _, info := range infos {
 			res.OrchestratorPool = append(res.OrchestratorPool, info.URL.String())
 		}
+	}
+
+	// Surface discovery freshness when the pool tracks it (DBOrchestratorPoolCache).
+	// Observability only — not a readiness signal.
+	if fp, ok := s.LivepeerNode.OrchestratorPool.(interface {
+		LastDiscoveryRefresh() (time.Time, int)
+	}); ok {
+		res.DiscoveryLastRefresh, res.DiscoveryOrchCount = fp.LastDiscoveryRefresh()
 	}
 
 	res.BroadcasterPrices = s.LivepeerNode.GetBasePrices()

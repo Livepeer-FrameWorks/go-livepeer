@@ -39,6 +39,9 @@ type NodeStatus struct {
 	RegisteredTranscoders       []RemoteTranscoderInfo
 	LocalTranscoding            bool // Indicates orchestrator that is also transcoder
 	BroadcasterPrices           map[string]*big.Rat
+	// Discovery freshness (observability only; not a readiness signal).
+	DiscoveryLastRefresh time.Time
+	DiscoveryOrchCount   int
 	// xxx add transcoder's version here
 }
 
@@ -178,4 +181,25 @@ type OrchNetworkCapabilities struct {
 	CapabilitiesPrices []*net.PriceInfo           `json:"capabilities_prices"`
 	Hardware           []*net.HardwareInformation `json:"hardware"`
 	Discovery          json.RawMessage            `json:"-"`
+}
+
+// DiscoverySnapshotSchemaVersion is bumped whenever the persisted snapshot
+// layout changes incompatibly; an older/newer snapshot is rejected on load.
+const DiscoverySnapshotSchemaVersion = 1
+
+// DiscoverySnapshot is the last good discovery result persisted so a restart
+// can hydrate before live discovery completes. It carries both the selection
+// rows (Orchestrators) and the routing capabilities (Capabilities) so a
+// hydrate can drive the real selection path, not just report caps. It is
+// identity-scoped (chain + broadcaster) so a snapshot from another network or
+// gateway is never applied.
+type DiscoverySnapshot struct {
+	SchemaVersion   int                        `json:"schema_version"`
+	ChainID         string                     `json:"chain_id"`
+	Network         string                     `json:"network"`
+	BroadcasterAddr string                     `json:"broadcaster_addr"`
+	Region          string                     `json:"region"`
+	CapturedAt      time.Time                  `json:"captured_at"`
+	Orchestrators   []*DBOrch                  `json:"orchestrators"`
+	Capabilities    []*OrchNetworkCapabilities `json:"capabilities"`
 }

@@ -15,10 +15,12 @@ var random = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 type ProbabilitySelectionAlgorithm struct {
 	MinPerfScore float64
+	MinStake     int64
 
 	StakeWeight float64
 	PriceWeight float64
 	RandWeight  float64
+	PerfWeight  float64
 
 	PriceExpFactor         float64
 	IgnoreMaxPriceIfNeeded bool
@@ -26,8 +28,29 @@ type ProbabilitySelectionAlgorithm struct {
 
 func (sa ProbabilitySelectionAlgorithm) Select(ctx context.Context, addrs []ethcommon.Address, stakes map[ethcommon.Address]int64, maxPrice *big.Rat, prices map[ethcommon.Address]*big.Rat, perfScores map[ethcommon.Address]float64) ethcommon.Address {
 	filtered := sa.filter(ctx, addrs, maxPrice, prices, perfScores)
-	probabilities := sa.calculateProbabilities(filtered, stakes, prices)
+	filtered = sa.filterByMinStake(ctx, filtered, stakes)
+	probabilities := sa.calculateProbabilities(filtered, stakes, prices, perfScores)
 	return selectBy(probabilities)
+}
+
+// filterByMinStake drops orchestrators below the configured minimum stake as an
+// eligibility gate, but falls back to all candidates if none qualify so a strict
+// floor can never empty the pool. Off by default (MinStake <= 0).
+func (sa ProbabilitySelectionAlgorithm) filterByMinStake(ctx context.Context, addrs []ethcommon.Address, stakes map[ethcommon.Address]int64) []ethcommon.Address {
+	if sa.MinStake <= 0 {
+		return addrs
+	}
+	var res []ethcommon.Address
+	for _, addr := range addrs {
+		if stakes[addr] >= sa.MinStake {
+			res = append(res, addr)
+		}
+	}
+	if len(res) == 0 {
+		clog.Warningf(ctx, "No Orchestrators passed min stake filter, not using the filter, numAddrs=%d, minStake=%d", len(addrs), sa.MinStake)
+		return addrs
+	}
+	return res
 }
 
 func (sa ProbabilitySelectionAlgorithm) filter(ctx context.Context, addrs []ethcommon.Address, maxPrice *big.Rat, prices map[ethcommon.Address]*big.Rat, perfScores map[ethcommon.Address]float64) []ethcommon.Address {
@@ -89,17 +112,41 @@ func filterByMaxPrice(ctx context.Context, addrs []ethcommon.Address, maxPrice *
 	return res
 }
 
-func (sa ProbabilitySelectionAlgorithm) calculateProbabilities(addrs []ethcommon.Address, stakes map[ethcommon.Address]int64, prices map[ethcommon.Address]*big.Rat) map[ethcommon.Address]float64 {
+func (sa ProbabilitySelectionAlgorithm) calculateProbabilities(addrs []ethcommon.Address, stakes map[ethcommon.Address]int64, prices map[ethcommon.Address]*big.Rat, perfScores map[ethcommon.Address]float64) map[ethcommon.Address]float64 {
 	pricesNorm := map[ethcommon.Address]float64{}
 	for _, addr := range addrs {
 		p, _ := prices[addr].Float64()
 		pricesNorm[addr] = math.Exp(-1 * p / sa.PriceExpFactor)
 	}
 
-	var priceSum, stakeSum float64
+	// Performance values with an exploration default: an orchestrator with no
+	// observed score yet is assigned the mean of the observed ones, so it sits
+	// mid-pack (RandWeight still surfaces it) instead of being starved or unfairly
+	// preferred. With no observations at all the term degenerates to uniform.
+	perfVals := map[ethcommon.Address]float64{}
+	var perfObserved float64
+	var perfKnown int
+	for _, addr := range addrs {
+		if v, ok := perfScores[addr]; ok && v > 0 {
+			perfObserved += v
+			perfKnown++
+		}
+	}
+	perfDefault := 0.0
+	if perfKnown > 0 {
+		perfDefault = perfObserved / float64(perfKnown)
+	}
+
+	var priceSum, stakeSum, perfSum float64
 	for _, addr := range addrs {
 		priceSum += pricesNorm[addr]
 		stakeSum += float64(stakes[addr])
+		v, ok := perfScores[addr]
+		if !ok || v <= 0 {
+			v = perfDefault
+		}
+		perfVals[addr] = v
+		perfSum += v
 	}
 
 	probs := map[ethcommon.Address]float64{}
@@ -112,9 +159,13 @@ func (sa ProbabilitySelectionAlgorithm) calculateProbabilities(addrs []ethcommon
 		if stakeSum != 0 {
 			stakeProb = float64(stakes[addr]) / stakeSum
 		}
+		perfProb := 1.0 / float64(len(addrs))
+		if perfSum != 0 {
+			perfProb = perfVals[addr] / perfSum
+		}
 		randProb := 1.0 / float64(len(addrs))
 
-		probs[addr] = sa.PriceWeight*priceProb + sa.StakeWeight*stakeProb + sa.RandWeight*randProb
+		probs[addr] = sa.PriceWeight*priceProb + sa.StakeWeight*stakeProb + sa.PerfWeight*perfProb + sa.RandWeight*randProb
 	}
 
 	return probs
