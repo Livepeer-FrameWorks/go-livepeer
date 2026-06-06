@@ -39,6 +39,18 @@ type StreamParameters struct {
 	PixelFormat       ffmpeg.PixelFormat
 	TimeoutMultiplier int // Used in the VOD workflow to allow us to be more lenient with timeouts
 
+	// Workload-aware transcode contract carried from the FrameWorks
+	// Livepeer-Transcode-Configuration header. Workload is "live" or "vod"
+	// (empty defaults to live behavior). DeadlineMs, when >0, is the gateway
+	// response budget the client will wait minus its socket margin; the gateway
+	// derives its per-orchestrator attempt budget from it so it returns a
+	// definitive result before the client's wall. MinSpeed is the minimum
+	// sustained speed factor (segment-duration / round-trip) tolerated for vod
+	// before an orchestrator is judged too slow.
+	Workload   string
+	DeadlineMs int
+	MinSpeed   float64
+
 	// FrameWorks tenant attribution propagated from Foghorn's auth-webhook
 	// response. Required for Decklog outcome telemetry when FrameWorks
 	// telemetry is enabled.
@@ -52,6 +64,13 @@ type StreamParameters struct {
 func (s *StreamParameters) StreamID() string {
 	return string(s.ManifestID) + "/" + s.RtmpKey
 }
+
+// Workload identifiers carried in StreamParameters.Workload. An empty value is
+// treated as live (fail-fast) behavior.
+const (
+	WorkloadLive = "live"
+	WorkloadVOD  = "vod"
+)
 
 type SegmentClip struct {
 	From time.Duration

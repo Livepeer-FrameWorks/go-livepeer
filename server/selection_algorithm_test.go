@@ -311,7 +311,7 @@ func TestCalculateProbabilities(t *testing.T) {
 				PriceExpFactor: testPriceExpFactor,
 			}
 
-			probs := sa.calculateProbabilities(orchs, stakes, prices)
+			probs := sa.calculateProbabilities(orchs, stakes, prices, nil)
 
 			require.Len(t, probs, len(expProbs))
 			for addr, expProb := range expProbs {

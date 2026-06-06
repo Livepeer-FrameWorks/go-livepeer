@@ -459,22 +459,22 @@ func TestSelectSession_NoSegsInFlight(t *testing.T) {
 	sess.SegsInFlight = []SegFlightMetadata{
 		{startTime: time.Now().Add(time.Duration(-2) * time.Second), segDur: 1 * time.Second},
 	}
-	s := selectSession(ctx, sessList, nil, 1)
+	s := selectSession(ctx, sessList, nil, 1, SELECTOR_LATENCY_SCORE_THRESHOLD)
 	assert.Nil(s)
 
 	// Session has no segs in flight, latency score = 0
 	sess.SegsInFlight = nil
-	s = selectSession(ctx, sessList, nil, 1)
+	s = selectSession(ctx, sessList, nil, 1, SELECTOR_LATENCY_SCORE_THRESHOLD)
 	assert.Nil(s)
 
 	// Session has no segs in flight, latency score > SELECTOR_LATENCY_SCORE_THRESHOLD
 	sess.LatencyScore = SELECTOR_LATENCY_SCORE_THRESHOLD + 0.001
-	s = selectSession(ctx, sessList, nil, 1)
+	s = selectSession(ctx, sessList, nil, 1, SELECTOR_LATENCY_SCORE_THRESHOLD)
 	assert.Nil(s)
 
 	// Session has no segs in flight, latency score > 0 and < SELECTOR_LATENCY_SCORE_THRESHOLD
 	sess.LatencyScore = SELECTOR_LATENCY_SCORE_THRESHOLD - 0.001
-	s = selectSession(ctx, sessList, nil, 1)
+	s = selectSession(ctx, sessList, nil, 1, SELECTOR_LATENCY_SCORE_THRESHOLD)
 	assert.Equal(sess, s)
 }
 

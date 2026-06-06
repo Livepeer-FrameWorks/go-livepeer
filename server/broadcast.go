@@ -174,10 +174,38 @@ type SessionPool struct {
 
 	createSessions sessionsCreator
 	cleanupSession sessionsCleanup
-	sus            *suspender
+	sus            orchSuspender
+
+	// latencyThreshold is the effective LatencyScore above which an
+	// orchestrator is swapped. Zero means use SELECTOR_LATENCY_SCORE_THRESHOLD;
+	// vod workloads relax it toward 1/MinSpeed so a single slow segment doesn't
+	// trigger a swap.
+	latencyThreshold float64
 }
 
-func NewSessionPool(mid core.ManifestID, poolSize, numOrchs int, sus *suspender, createSession sessionsCreator, cleanupSession sessionsCleanup,
+// latencyScoreThreshold returns the effective LatencyScore swap threshold for
+// this pool, falling back to the package default when unset.
+func (sp *SessionPool) latencyScoreThreshold() float64 {
+	if sp.latencyThreshold > 0 {
+		return sp.latencyThreshold
+	}
+	return SELECTOR_LATENCY_SCORE_THRESHOLD
+}
+
+// latencyThresholdForWorkload derives the LatencyScore swap threshold from the
+// workload contract. LatencyScore is round-trip / segment-duration, so the
+// reciprocal of the minimum sustained speed factor is the slowest round-trip a
+// vod workload tolerates before swapping. live keeps the aggressive default.
+func latencyThresholdForWorkload(params *core.StreamParameters) float64 {
+	if params != nil && params.Workload == core.WorkloadVOD && params.MinSpeed > 0 {
+		if thr := 1.0 / params.MinSpeed; thr > SELECTOR_LATENCY_SCORE_THRESHOLD {
+			return thr
+		}
+	}
+	return SELECTOR_LATENCY_SCORE_THRESHOLD
+}
+
+func NewSessionPool(mid core.ManifestID, poolSize, numOrchs int, sus orchSuspender, createSession sessionsCreator, cleanupSession sessionsCleanup,
 	sel BroadcastSessionsSelector) *SessionPool {
 
 	return &SessionPool{
@@ -281,7 +309,7 @@ func removeSessionFromList(sessions []*BroadcastSession, sess *BroadcastSession)
 	return res
 }
 
-func selectSession(ctx context.Context, sessions []*BroadcastSession, exclude []*BroadcastSession, durMult int) *BroadcastSession {
+func selectSession(ctx context.Context, sessions []*BroadcastSession, exclude []*BroadcastSession, durMult int, latencyThreshold float64) *BroadcastSession {
 	for _, session := range sessions {
 		// A session in the exclusion list is not selectable
 		if includesSession(exclude, session) {
@@ -291,7 +319,7 @@ func selectSession(ctx context.Context, sessions []*BroadcastSession, exclude []
 		// A session without any segments in flight and that has a latency score that meets the selector
 		// threshold is selectable
 		if len(session.SegsInFlight) == 0 {
-			if session.LatencyScore > 0 && session.LatencyScore <= SELECTOR_LATENCY_SCORE_THRESHOLD {
+			if session.LatencyScore > 0 && session.LatencyScore <= latencyThreshold {
 				clog.PublicInfof(ctx,
 					"Reusing Orchestrator, reason=%v",
 					fmt.Sprintf(
@@ -376,7 +404,7 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 
 		// Re-use last session if oldest segment is in-flight for < segDur
 		gotFromLast := false
-		sess = selectSession(ctx, sp.lastSess, selectedSessions, 1)
+		sess = selectSession(ctx, sp.lastSess, selectedSessions, 1, sp.latencyScoreThreshold())
 		if sess == nil {
 			// Or try a new session from the available ones
 			sess = sp.sel.Select(ctx)
@@ -386,7 +414,7 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 
 		if sess == nil {
 			// If no new sessions are available, re-use last session when oldest segment is in-flight for < 2 * segDur
-			sess = selectSession(ctx, sp.lastSess, selectedSessions, 2)
+			sess = selectSession(ctx, sp.lastSess, selectedSessions, 2, sp.latencyScoreThreshold())
 			if sess != nil {
 				gotFromLast = true
 				clog.V(common.DEBUG).Infof(ctx, "No sessions in the selector for manifestID=%v re-using orch=%v with acceptable in-flight time",
@@ -487,7 +515,7 @@ func (sp *SessionPool) completeSession(sess *BroadcastSession) {
 
 		// If the latency score meets the selector threshold, we skip giving the session back to the selector
 		// because we consider it for re-use in selectSession()
-		if sess.LatencyScore > 0 && sess.LatencyScore <= SELECTOR_LATENCY_SCORE_THRESHOLD {
+		if sess.LatencyScore > 0 && sess.LatencyScore <= sp.latencyScoreThreshold() {
 			return
 		}
 
@@ -536,8 +564,13 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 	maxInflight := common.HTTPTimeout.Seconds() / SegLen.Seconds()
 	trustedNumOrchs := int(math.Min(trustedPoolSize, maxInflight*2))
 	untrustedNumOrchs := int(untrustedPoolSize)
-	susTrusted := newSuspender()
-	susUntrusted := newSuspender()
+	// Durable, regionally-shared orchestrator health when configured; in-memory
+	// otherwise. Scoped by workload + capability so a bad orchestrator for vod
+	// doesn't exclude it for live and vice versa.
+	healthStore := sharedOrchHealthStore()
+	capKey := common.ProfilesNames(params.Profiles)
+	susTrusted := healthStore.scoped(params.Workload, capKey)
+	susUntrusted := healthStore.scoped(params.Workload, capKey)
 	cleanupSession := func(sessionID string) {
 		node.Sender.CleanupSession(sessionID)
 	}
@@ -551,12 +584,22 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 	if node.Eth != nil {
 		stakeRdr = &storeStakeReader{store: node.Database}
 	}
+	// Durable performance reader for this workload+capability bucket; shared by
+	// both pools so the in-process memo is reused. nil when no Redis store.
+	perfReader := healthStore.perfReader(params.Workload, capKey)
+	trustedSel := NewMinLSSelector(stakeRdr, 1.0, node.SelectionAlgorithm, node.OrchPerfScore, params.Capabilities)
+	untrustedSel := NewMinLSSelector(stakeRdr, 1.0, node.SelectionAlgorithm, node.OrchPerfScore, params.Capabilities)
+	trustedSel.perfReader = perfReader
+	untrustedSel.perfReader = perfReader
 	bsm := &BroadcastSessionsManager{
 		mid:              params.ManifestID,
 		VerificationFreq: params.VerificationFreq,
-		trustedPool:      NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, NewMinLSSelector(stakeRdr, 1.0, node.SelectionAlgorithm, node.OrchPerfScore, params.Capabilities)),
-		untrustedPool:    NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, NewMinLSSelector(stakeRdr, 1.0, node.SelectionAlgorithm, node.OrchPerfScore, params.Capabilities)),
+		trustedPool:      NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, trustedSel),
+		untrustedPool:    NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, untrustedSel),
 	}
+	latencyThreshold := latencyThresholdForWorkload(params)
+	bsm.trustedPool.latencyThreshold = latencyThreshold
+	bsm.untrustedPool.latencyThreshold = latencyThreshold
 	bsm.trustedPool.refreshSessions(ctx)
 	bsm.untrustedPool.refreshSessions(ctx)
 	return bsm
@@ -768,7 +811,7 @@ func (bsm *BroadcastSessionsManager) hasOrchestratorPool() bool {
 		bsm.untrustedPool.numOrchs > 0
 }
 
-func selectOrchestrator(ctx context.Context, n *core.LivepeerNode, params *core.StreamParameters, count int, sus *suspender,
+func selectOrchestrator(ctx context.Context, n *core.LivepeerNode, params *core.StreamParameters, count int, sus common.Suspender,
 	scorePred common.ScorePred, cleanupSession sessionsCleanup) ([]*BroadcastSession, error) {
 
 	if n.OrchestratorPool == nil {
@@ -1591,7 +1634,7 @@ func isNonRetryableError(err error) bool {
 			return true
 		}
 	}
-	if errors.Is(err, maxTranscodeAttempts) {
+	if errors.Is(err, maxTranscodeAttempts) || errors.Is(err, errSeqPayloadConflict) {
 		return true
 	}
 	return false

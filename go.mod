@@ -4,8 +4,9 @@ go 1.26.2
 
 require (
 	contrib.go.opencensus.io/exporter/prometheus v0.4.2
-	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260525213110-b4f260d92aac
+	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260606135635-49913f02f160
 	github.com/Masterminds/semver/v3 v3.2.1
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/bluenviron/gortsplib/v4 v4.12.3
 	github.com/bluenviron/mediacommon/v2 v2.4.0
 	github.com/cenkalti/backoff v2.2.1+incompatible
@@ -34,6 +35,7 @@ require (
 	github.com/pion/webrtc/v4 v4.0.11
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.23.2
+	github.com/redis/go-redis/v9 v9.20.0
 	github.com/segmentio/kafka-go v0.4.47
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.34.0
@@ -80,6 +82,7 @@ require (
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.39.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect
@@ -284,7 +287,7 @@ require (
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sync v0.20.0
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect

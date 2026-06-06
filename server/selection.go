@@ -100,6 +100,12 @@ type Selector struct {
 	perfScore          *common.PerfScore
 	capabilities       common.CapabilityComparator
 	sortCompFunc       func(sess1, sess2 *BroadcastSession) bool
+
+	// perfReader is the FrameWorks durable per-instance performance source
+	// (end-to-end round-trip-speed EWMA, keyed by endpoint), scoped to this pool's
+	// workload + capability bucket. nil when no durable store is configured, in
+	// which case selection keeps its stake/price/rand behavior.
+	perfReader orchPerfReader
 }
 
 func NewSelector(stakeRdr stakeReader, selectionAlgorithm common.SelectionAlgorithm, perfScore *common.PerfScore, capabilities common.CapabilityComparator) *Selector {
@@ -250,6 +256,29 @@ func (s *MinLSSelector) Clear() {
 	s.stakeRdr = nil
 }
 
+// candidateID is the identity used to GROUP a session for stake/price/perf
+// selection: the on-chain service (orchestrator) address. Stake in particular is
+// registry stake keyed by that address, and one service may run many instances.
+// It falls back to the payment recipient when the orchestrator did not advertise
+// an address (older orchestrators / off-chain stubs). This is only a selection
+// grouping key — payment still uses each session's own TicketParams.Recipient
+// downstream, and perf/suspension remain keyed by the concrete instance endpoint.
+func candidateID(sess *BroadcastSession) (ethcommon.Address, bool) {
+	info := sess.OrchestratorInfo
+	if info == nil {
+		return ethcommon.Address{}, false
+	}
+	if len(info.Address) > 0 {
+		if a := ethcommon.BytesToAddress(info.Address); a != (ethcommon.Address{}) {
+			return a, true
+		}
+	}
+	if tp := info.GetTicketParams(); tp != nil && len(tp.Recipient) > 0 {
+		return ethcommon.BytesToAddress(tp.Recipient), true
+	}
+	return ethcommon.Address{}, false
+}
+
 // Use selection algorithm to select from unknownSessions
 func (s *Selector) selectUnknownSession(ctx context.Context) *BroadcastSession {
 	if len(s.sessions) == 0 {
@@ -270,7 +299,7 @@ func (s *Selector) selectUnknownSession(ctx context.Context) *BroadcastSession {
 		if sess.OrchestratorInfo.GetTicketParams() == nil {
 			continue
 		}
-		addr := ethcommon.BytesToAddress(sess.OrchestratorInfo.TicketParams.Recipient)
+		addr, _ := candidateID(sess)
 		if _, ok := addrCount[addr]; !ok {
 			addrs = append(addrs, addr)
 		}
@@ -297,18 +326,62 @@ func (s *Selector) selectUnknownSession(ctx context.Context) *BroadcastSession {
 		}
 		s.perfScore.Mu.Unlock()
 	}
+	// FrameWorks durable performance is keyed by the concrete instance ENDPOINT,
+	// not a wallet, so distinct instances behind one redeem address are scored
+	// separately. For the address-keyed probability algorithm an address's perf is
+	// the best of its instances' end-to-end speeds (we route to that instance
+	// below); the per-endpoint scores also break ties between instances that share
+	// the selected address. Unknown instances are left absent so the algorithm's
+	// exploration default still samples them.
+	var endpointPerf map[string]float64
+	if s.perfReader != nil {
+		var endpoints []string
+		for _, sess := range s.sessions {
+			if ep := sess.OrchestratorInfo.GetTranscoder(); ep != "" {
+				endpoints = append(endpoints, ep)
+			}
+		}
+		endpointPerf = s.perfReader.scores(endpoints)
+		if len(endpointPerf) > 0 {
+			if perfScores == nil {
+				perfScores = map[ethcommon.Address]float64{}
+			}
+			for _, sess := range s.sessions {
+				if sess.OrchestratorInfo.GetTicketParams() == nil {
+					continue
+				}
+				addr, _ := candidateID(sess)
+				if v, ok := endpointPerf[sess.OrchestratorInfo.GetTranscoder()]; ok && v > perfScores[addr] {
+					perfScores[addr] = v
+				}
+			}
+		}
+	}
 
 	selected := s.selectionAlgorithm.Select(ctx, addrs, stakes, maxPrice, prices, perfScores)
 
+	// Among the sessions under the selected address, prefer the instance with the
+	// best observed endpoint performance (falls back to first when no perf data).
+	bestIdx := -1
+	var bestPerf float64
 	for i, sess := range s.sessions {
 		if sess.OrchestratorInfo.GetTicketParams() == nil {
 			continue
 		}
-		addr := ethcommon.BytesToAddress(sess.OrchestratorInfo.TicketParams.Recipient)
-		if addr == selected {
-			s.removeUnknownSession(i)
-			return sess
+		addr, _ := candidateID(sess)
+		if addr != selected {
+			continue
 		}
+		p := endpointPerf[sess.OrchestratorInfo.GetTranscoder()]
+		if bestIdx == -1 || p > bestPerf {
+			bestIdx = i
+			bestPerf = p
+		}
+	}
+	if bestIdx >= 0 {
+		sess := s.sessions[bestIdx]
+		s.removeUnknownSession(bestIdx)
+		return sess
 	}
 
 	return nil

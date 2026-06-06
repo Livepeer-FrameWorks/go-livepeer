@@ -28,6 +28,8 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.SelectRandWeight = fs.Float64("selectRandFreq", *cfg.SelectRandWeight, "Weight of the random factor in the orchestrator selection algorithm")
 	cfg.SelectStakeWeight = fs.Float64("selectStakeWeight", *cfg.SelectStakeWeight, "Weight of the stake factor in the orchestrator selection algorithm")
 	cfg.SelectPriceWeight = fs.Float64("selectPriceWeight", *cfg.SelectPriceWeight, "Weight of the price factor in the orchestrator selection algorithm")
+	cfg.SelectPerfWeight = fs.Float64("selectPerfWeight", *cfg.SelectPerfWeight, "Weight of the durable performance factor (observed end-to-end round-trip-speed EWMA) in the orchestrator selection algorithm")
+	cfg.SelectMinStake = fs.Int64("selectMinStake", *cfg.SelectMinStake, "Minimum orchestrator stake to be eligible for selection; 0 disables. Falls back to all candidates if none qualify")
 	cfg.SelectPriceExpFactor = fs.Float64("selectPriceExpFactor", *cfg.SelectPriceExpFactor, "Expresses how significant a small change of price is for the selection algorithm; default 100")
 	cfg.OrchPerfStatsURL = fs.String("orchPerfStatsUrl", *cfg.OrchPerfStatsURL, "URL of Orchestrator Performance Stream Tester")
 	cfg.Region = fs.String("region", *cfg.Region, "Region in which a gateway is deployed; used to select the region while using the orchestrator's performance stats")

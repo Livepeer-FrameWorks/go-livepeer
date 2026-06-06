@@ -106,6 +106,8 @@ type LivepeerConfig struct {
 	SelectRandWeight           *float64
 	SelectStakeWeight          *float64
 	SelectPriceWeight          *float64
+	SelectPerfWeight           *float64
+	SelectMinStake             *int64
 	SelectPriceExpFactor       *float64
 	OrchPerfStatsURL           *string
 	Region                     *string
@@ -230,6 +232,8 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultSelectRandWeight := 0.3
 	defaultSelectStakeWeight := 0.7
 	defaultSelectPriceWeight := 0.0
+	defaultSelectPerfWeight := 0.0
+	defaultSelectMinStake := int64(0)
 	defaultSelectPriceExpFactor := 100.0
 	defaultMaxSessions := strconv.Itoa(10)
 	defaultOrchPerfStatsURL := ""
@@ -363,6 +367,8 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		SelectRandWeight:        &defaultSelectRandWeight,
 		SelectStakeWeight:       &defaultSelectStakeWeight,
 		SelectPriceWeight:       &defaultSelectPriceWeight,
+		SelectPerfWeight:        &defaultSelectPerfWeight,
+		SelectMinStake:          &defaultSelectMinStake,
 		SelectPriceExpFactor:    &defaultSelectPriceExpFactor,
 		MaxSessions:             &defaultMaxSessions,
 		OrchPerfStatsURL:        &defaultOrchPerfStatsURL,
@@ -2442,18 +2448,38 @@ func getCapabilityPrices(capabilitiesPrices string) []ModelPrice {
 	return prices
 }
 
+// envFloatOr returns the float value of env var key, or def when unset/invalid.
+// Lets the FrameWorks monorepo own selection-weight policy (perf-dominant, stake
+// demoted) by emitting FRAMEWORKS_SELECT_* env to the gateway, without baking
+// FrameWorks defaults into upstream flag defaults.
+func envFloatOr(key string, def float64) float64 {
+	if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			return v
+		}
+	}
+	return def
+}
+
 func createSelectionAlgorithm(cfg LivepeerConfig) (common.SelectionAlgorithm, error) {
-	sumWeight := *cfg.SelectStakeWeight + *cfg.SelectPriceWeight + *cfg.SelectRandWeight
+	stakeWeight := envFloatOr("FRAMEWORKS_SELECT_STAKE_WEIGHT", *cfg.SelectStakeWeight)
+	priceWeight := envFloatOr("FRAMEWORKS_SELECT_PRICE_WEIGHT", *cfg.SelectPriceWeight)
+	randWeight := envFloatOr("FRAMEWORKS_SELECT_RAND_WEIGHT", *cfg.SelectRandWeight)
+	perfWeight := envFloatOr("FRAMEWORKS_SELECT_PERF_WEIGHT", *cfg.SelectPerfWeight)
+
+	sumWeight := stakeWeight + priceWeight + randWeight + perfWeight
 	if math.Abs(sumWeight-1.0) > 0.0001 {
 		return nil, fmt.Errorf(
-			"sum of selection algorithm weights must be 1.0, stakeWeight=%v, priceWeight=%v, randWeight=%v",
-			*cfg.SelectStakeWeight, *cfg.SelectPriceWeight, *cfg.SelectRandWeight)
+			"sum of selection algorithm weights must be 1.0, stakeWeight=%v, priceWeight=%v, randWeight=%v, perfWeight=%v",
+			stakeWeight, priceWeight, randWeight, perfWeight)
 	}
 	return server.ProbabilitySelectionAlgorithm{
 		MinPerfScore:           *cfg.MinPerfScore,
-		StakeWeight:            *cfg.SelectStakeWeight,
-		PriceWeight:            *cfg.SelectPriceWeight,
-		RandWeight:             *cfg.SelectRandWeight,
+		MinStake:               *cfg.SelectMinStake,
+		StakeWeight:            stakeWeight,
+		PriceWeight:            priceWeight,
+		RandWeight:             randWeight,
+		PerfWeight:             perfWeight,
 		PriceExpFactor:         *cfg.SelectPriceExpFactor,
 		IgnoreMaxPriceIfNeeded: *cfg.IgnoreMaxPriceIfNeeded,
 	}, nil
