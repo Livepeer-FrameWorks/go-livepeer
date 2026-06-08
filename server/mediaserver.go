@@ -1679,6 +1679,14 @@ func (s *LivepeerServer) GetNodeStatus() *common.NodeStatus {
 		}
 	}
 
+	// Surface discovery freshness when the pool tracks it (DBOrchestratorPoolCache).
+	// Observability only — not a readiness signal.
+	if fp, ok := s.LivepeerNode.OrchestratorPool.(interface {
+		LastDiscoveryRefresh() (time.Time, int)
+	}); ok {
+		res.DiscoveryLastRefresh, res.DiscoveryOrchCount = fp.LastDiscoveryRefresh()
+	}
+
 	res.BroadcasterPrices = s.LivepeerNode.GetBasePrices()
 
 	return res

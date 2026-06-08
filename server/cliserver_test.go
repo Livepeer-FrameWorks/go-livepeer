@@ -208,7 +208,7 @@ func TestGetStatus(t *testing.T) {
 	req.Nil(err)
 	// expected := fmt.Sprintf(`{"Manifests":{},"InternalManifests":{},"StreamInfo":{},"OrchestratorPool":[],"Version":"undefined","GolangRuntimeVersion":"%s","GOArch":"%s","GOOS":"%s","RegisteredTranscodersNumber":1,"RegisteredTranscoders":[{"Address":"TestAddress","Capacity":5}],"LocalTranscoding":false}`,
 	// 	runtime.Version(), runtime.GOARCH, runtime.GOOS)
-	expected := fmt.Sprintf(`{"Manifests":{},"InternalManifests":{},"StreamInfo":{},"OrchestratorPool":[],"OrchestratorPoolInfos":null,"Version":"undefined","GolangRuntimeVersion":"%s","GOArch":"%s","GOOS":"%s","RegisteredTranscodersNumber":1,"RegisteredTranscoders":[{"Address":"TestAddress","Capacity":5}],"LocalTranscoding":false,"BroadcasterPrices":{}}`,
+	expected := fmt.Sprintf(`{"Manifests":{},"InternalManifests":{},"StreamInfo":{},"OrchestratorPool":[],"OrchestratorPoolInfos":null,"Version":"undefined","GolangRuntimeVersion":"%s","GOArch":"%s","GOOS":"%s","RegisteredTranscodersNumber":1,"RegisteredTranscoders":[{"Address":"TestAddress","Capacity":5}],"LocalTranscoding":false,"BroadcasterPrices":{},"DiscoveryLastRefresh":"0001-01-01T00:00:00Z","DiscoveryOrchCount":0}`,
 		runtime.Version(), runtime.GOARCH, runtime.GOOS)
 	assert.Equal(expected, string(body))
 }

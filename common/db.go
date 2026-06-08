@@ -460,6 +460,25 @@ func (db *DB) SetChainID(id *big.Int) error {
 	return nil
 }
 
+// SelectNetworkCapabilitiesSnapshot returns the raw JSON of the last persisted
+// discovery snapshot, or "" if none has been stored. Marshaling/validation of
+// the DiscoverySnapshot envelope is handled by the discovery package.
+func (db *DB) SelectNetworkCapabilitiesSnapshot() (string, error) {
+	if db == nil {
+		return "", nil
+	}
+	return db.selectKVStore("networkCapabilitiesSnapshot")
+}
+
+// UpdateNetworkCapabilitiesSnapshot persists the raw JSON of a discovery
+// snapshot. It is best-effort caching; callers should not fail on error.
+func (db *DB) UpdateNetworkCapabilitiesSnapshot(value string) error {
+	if db == nil {
+		return nil
+	}
+	return db.updateKVStore("networkCapabilitiesSnapshot", value)
+}
+
 func (db *DB) selectKVStore(key string) (string, error) {
 	row := db.selectKV.QueryRow(key)
 	var valueString string

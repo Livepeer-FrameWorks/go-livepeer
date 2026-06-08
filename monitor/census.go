@@ -228,6 +228,8 @@ type (
 		mAIFirstSegmentDelay        *stats.Int64Measure
 		mAILiveAttempts             *stats.Int64Measure
 		mAINumOrchs                 *stats.Int64Measure
+		mDiscoveryOrchCount         *stats.Int64Measure
+		mDiscoveryLastRefresh       *stats.Int64Measure
 
 		mAIWhipTransportBytesReceived *stats.Int64Measure
 		mAIWhipTransportBytesSent     *stats.Int64Measure
@@ -420,6 +422,8 @@ func InitCensus(nodeType NodeType, version string) {
 	census.mAIFirstSegmentDelay = stats.Int64("ai_first_segment_delay_ms", "Delay of the first live AI segment being processed", "ms")
 	census.mAILiveAttempts = stats.Int64("ai_live_attempts", "AI Live stream attempted", "tot")
 	census.mAINumOrchs = stats.Int64("ai_orchestrators_available_total", "AI Live number of available orchestrators", "tot")
+	census.mDiscoveryOrchCount = stats.Int64("discovery_orchestrators_selectable", "Number of currently selectable orchestrators from discovery", "tot")
+	census.mDiscoveryLastRefresh = stats.Int64("discovery_last_refresh_timestamp_seconds", "Unix time of the last successful discovery refresh", "s")
 
 	census.mAIWhipTransportBytesReceived = stats.Int64("ai_whip_transport_bytes_received", "Number of bytes received on a WHIP connection", "byte")
 	census.mAIWhipTransportBytesSent = stats.Int64("ai_whip_transport_bytes_sent", "Number of bytes sent on a WHIP connection", "byte")
@@ -1155,6 +1159,20 @@ func InitCensus(nodeType NodeType, version string) {
 			Name:        "ai_orchestrators_available_total",
 			Measure:     census.mAINumOrchs,
 			Description: "AI Live number of available orchestrators",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "discovery_orchestrators_selectable",
+			Measure:     census.mDiscoveryOrchCount,
+			Description: "Number of currently selectable orchestrators from discovery",
+			TagKeys:     baseTags,
+			Aggregation: view.LastValue(),
+		},
+		{
+			Name:        "discovery_last_refresh_timestamp_seconds",
+			Measure:     census.mDiscoveryLastRefresh,
+			Description: "Unix time of the last successful discovery refresh",
 			TagKeys:     baseTags,
 			Aggregation: view.LastValue(),
 		},
@@ -2335,6 +2353,18 @@ func AINumOrchestrators(count int, modelName string) {
 		census.mAINumOrchs.M(int64(count))); err != nil {
 		glog.Errorf("Error recording metrics err=%q", err)
 	}
+}
+
+// DiscoveryRefresh records the result of a successful discovery refresh: the
+// number of currently selectable orchestrators and when it happened. This is
+// observability only — readiness is gated separately on the live selection path.
+func DiscoveryRefresh(at time.Time, selectableOrchs int) {
+	if !Enabled {
+		return
+	}
+	stats.Record(census.ctx,
+		census.mDiscoveryOrchCount.M(int64(selectableOrchs)),
+		census.mDiscoveryLastRefresh.M(at.Unix()))
 }
 
 // Convert wei to gwei

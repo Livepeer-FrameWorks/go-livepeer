@@ -34,8 +34,39 @@ const RinkebyChainId = 4
 
 func (s *LivepeerServer) healthzHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		respondOk(w, nil)
+		// Readiness is gated on actual usability: a live process with zero
+		// selectable orchestrators is not ready to serve. The listener still
+		// binds immediately (discovery runs in the background), so a 503 here
+		// means "no orchestrators yet", not "process down".
+		n := s.usableOrchestratorCount()
+		w.Header().Set("Content-Type", "application/json")
+		if n <= 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		w.Write([]byte(fmt.Sprintf(`{"orchestrators":%d}`, n)))
 	})
+}
+
+// usableOrchestratorCount returns how many orchestrators selection can
+// currently use. It prefers the discovery cache's cached count so health probes
+// don't hit SQLite on every call, and falls back to a live GetInfos() lookup
+// before the first refresh (cold start, or a freshly hydrated replacement host)
+// so readiness isn't reported as 0 while selectable rows already exist.
+func (s *LivepeerServer) usableOrchestratorCount() int {
+	pool := s.LivepeerNode.OrchestratorPool
+	if pool == nil {
+		return 0
+	}
+	if c, ok := pool.(interface {
+		UsableOrchCount() (int, bool)
+	}); ok {
+		if n, refreshed := c.UsableOrchCount(); refreshed {
+			return n
+		}
+	}
+	return len(pool.GetInfos())
 }
 
 // Status

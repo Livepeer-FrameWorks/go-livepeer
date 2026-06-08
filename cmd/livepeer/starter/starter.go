@@ -1752,7 +1752,36 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		if *cfg.Network != "offchain" {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			dbOrchPoolCache, err := discovery.NewDBOrchestratorPoolCache(ctx, n, timeWatcher, orchBlacklist, *cfg.DiscoveryTimeout, *cfg.LiveAICapReportInterval)
+
+			// On the DB-cache path, hydrate the last good discovery snapshot
+			// before building the pool cache: this restores capability-aware
+			// routing on restart and lets the readiness gate report ready
+			// without blocking on a fresh global crawl.
+			var hydratedAt time.Time
+			var hydratedOrchCount int
+			if *cfg.OrchWebhookURL == "" && len(orchURLs) == 0 {
+				if snap := discovery.HydrateFromSnapshot(n, *cfg.Network, bcast.Address().Hex(), timeWatcher.LastInitializedRound(), time.Now()); snap != nil {
+					hydratedAt = snap.CapturedAt
+					hydratedOrchCount = len(snap.Orchestrators)
+				}
+			}
+
+			// AsyncInitialDiscovery binds the HTTP listener immediately and
+			// crawls orchestrators in the background (with self-healing retry)
+			// instead of blocking startup until discovery completes. HydratedAt
+			// seeds freshness so the first empty crawl doesn't wipe hydrated caps.
+			dbOrchPoolCache, err := discovery.DBOrchestratorPoolCacheConfig{
+				Ctx:                     ctx,
+				Node:                    n,
+				RoundsManager:           timeWatcher,
+				OrchBlacklist:           orchBlacklist,
+				DiscoveryTimeout:        *cfg.DiscoveryTimeout,
+				LiveAICapReportInterval: *cfg.LiveAICapReportInterval,
+				AsyncInitialDiscovery:   true,
+				Network:                 *cfg.Network,
+				HydratedAt:              hydratedAt,
+				HydratedOrchCount:       hydratedOrchCount,
+			}.New()
 			if err != nil {
 				exit("Could not create orchestrator pool with DB cache: %v", err)
 			}
