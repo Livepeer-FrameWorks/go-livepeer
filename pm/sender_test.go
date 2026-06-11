@@ -388,6 +388,23 @@ func TestCreateTicketBatch_SigningError_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "error signing")
 }
 
+func TestCreateTicketBatch_ZeroExpirationGuaranteedWin_ReturnsError(t *testing.T) {
+	sender := defaultSender(t)
+	am := sender.signer.(*stubSigner)
+	am.saveSignRequest = true
+
+	ticketParams := defaultTicketParams(t, RandAddress())
+	ticketParams.FaceValue = big.NewInt(1000)
+	ticketParams.WinProb = maxWinProb
+	ticketParams.ExpirationBlock = big.NewInt(0)
+	sessionID := sender.StartSession(ticketParams)
+
+	batch, err := sender.CreateTicketBatch(sessionID, 1)
+	assert.Nil(t, batch)
+	assert.EqualError(t, err, faceValueTooLowErrStr(ticketParams.FaceValue))
+	assert.Empty(t, am.signRequests)
+}
+
 func TestCreateTicketBatch_ConcurrentCallsForSameSession_SenderNonceIncrementsCorrectly(t *testing.T) {
 	totalBatches := 100
 	lock := sync.RWMutex{}
@@ -503,8 +520,35 @@ func TestValidateTicketParams_FaceValueTooLow_ReturnsErr(t *testing.T) {
 		ExpirationBlock: big.NewInt(100),
 	}
 	err := sender.ValidateTicketParams(ticketParams)
-	assert.EqualError(t, err, fmt.Sprintf("ticket faceValue too low faceValue=%v", ticketParams.FaceValue))
+	assert.EqualError(t, err, faceValueTooLowErrStr(ticketParams.FaceValue))
 	evMultiplier = oldEVMul
+}
+
+func TestValidateTicketParams_ZeroExpirationGuaranteedWin_ReturnsErr(t *testing.T) {
+	sender := defaultSender(t)
+
+	ticketParams := &TicketParams{
+		FaceValue:       big.NewInt(1000),
+		WinProb:         maxWinProb,
+		ExpirationBlock: big.NewInt(0),
+	}
+
+	err := sender.ValidateTicketParams(ticketParams)
+	assert.EqualError(t, err, faceValueTooLowErrStr(ticketParams.FaceValue))
+}
+
+func TestValidateTicketParams_ZeroExpirationZeroEV_NoError(t *testing.T) {
+	sender := defaultSender(t)
+	sm := sender.senderManager.(*stubSenderManager)
+	sm.info[sender.signer.Account().Address].Deposit = big.NewInt(0)
+
+	ticketParams := &TicketParams{
+		FaceValue:       big.NewInt(0),
+		WinProb:         big.NewInt(0),
+		ExpirationBlock: big.NewInt(0),
+	}
+
+	assert.NoError(t, sender.ValidateTicketParams(ticketParams))
 }
 
 func TestValidateTicketParams_ExpiredParams_ReturnsError(t *testing.T) {
@@ -641,6 +685,10 @@ func defaultTicketParams(_ *testing.T, recipient ethcommon.Address) TicketParams
 
 func maxFaceValueErrStr(faceValue, maxFaceValue *big.Int) string {
 	return fmt.Sprintf("ticket faceValue %v > max faceValue %v", faceValue, maxFaceValue)
+}
+
+func faceValueTooLowErrStr(faceValue *big.Int) string {
+	return fmt.Sprintf("ticket faceValue too low / winProb too high faceValue=%v", faceValue)
 }
 
 func maxTicketEVErrStr(ev *big.Rat, maxEV *big.Rat) string {

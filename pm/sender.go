@@ -184,15 +184,13 @@ func (s *sender) validateTicketParams(ticketParams *TicketParams, numTickets int
 		return fmt.Errorf("ticketParams is nil")
 	}
 
-	if ticketParams.ExpirationBlock.Int64() == 0 {
-		return nil
-	}
+	if ticketParams.ExpirationBlock != nil && ticketParams.ExpirationBlock.Int64() != 0 {
+		latestL1Block := s.timeManager.LastSeenL1Block()
 
-	latestL1Block := s.timeManager.LastSeenL1Block()
-
-	currentBuffer := new(big.Int).Sub(ticketParams.ExpirationBlock, latestL1Block).Int64()
-	if currentBuffer <= paramsExpiryBuffer {
-		return ErrTicketParamsExpired
+		currentBuffer := new(big.Int).Sub(ticketParams.ExpirationBlock, latestL1Block).Int64()
+		if currentBuffer <= paramsExpiryBuffer {
+			return ErrTicketParamsExpired
+		}
 	}
 
 	ev := ticketEV(ticketParams.FaceValue, ticketParams.WinProb)
@@ -201,7 +199,7 @@ func (s *sender) validateTicketParams(ticketParams *TicketParams, numTickets int
 	}
 
 	if ev.Cmp(new(big.Rat).SetInt(ticketParams.FaceValue)) >= 0 {
-		return fmt.Errorf("ticket faceValue too low faceValue=%v", ticketParams.FaceValue)
+		return fmt.Errorf("ticket faceValue too low / winProb too high faceValue=%v", ticketParams.FaceValue)
 	}
 	if ev.Cmp(s.maxEV) > 0 {
 		return fmt.Errorf("ticket EV %v > max ticket EV %v", ev.FloatString(5), s.maxEV.FloatString(5))
@@ -216,7 +214,7 @@ func (s *sender) validateTicketParams(ticketParams *TicketParams, numTickets int
 		return err
 	}
 
-	totalEV := ev.Mul(ev, new(big.Rat).SetInt64(int64(numTickets)))
+	totalEV := new(big.Rat).Mul(ev, new(big.Rat).SetInt64(int64(numTickets)))
 	if totalEV.Cmp(s.maxTotalEV) > 0 {
 		return fmt.Errorf("total ticket EV %v for %v tickets > max total ticket EV %v", totalEV.FloatString(5), numTickets, s.maxTotalEV.FloatString(5))
 	}
