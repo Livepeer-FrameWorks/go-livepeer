@@ -142,6 +142,8 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	fs.StringVar(cfg.Datadir, "dataDir", *cfg.Datadir, "Directory that data is stored in")
 	cfg.Objectstore = fs.String("objectStore", *cfg.Objectstore, "url of primary object store")
 	cfg.Recordstore = fs.String("recordStore", *cfg.Recordstore, "url of object store for recordings")
+	cfg.OSAllowInternalCIDRs = fs.String("osAllowInternalCIDRs", *cfg.OSAllowInternalCIDRs, "comma-separated internal CIDRs explicitly allowed for remote object-store URLs")
+	cfg.TrustedProxyCIDRs = fs.String("trustedProxyCIDRs", *cfg.TrustedProxyCIDRs, "comma-separated proxy CIDRs trusted to overwrite X-Forwarded-For")
 
 	// Fast Verification GS bucket:
 	cfg.FVfailGsBucket = fs.String("FVfailGsbucket", *cfg.FVfailGsBucket, "Google Cloud Storage bucket for storing segments, which failed fast verification")

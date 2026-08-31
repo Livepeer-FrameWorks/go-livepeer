@@ -1162,7 +1162,7 @@ func TestUpdateSession(t *testing.T) {
 	assert.Equal("foo", sess.PMSessionID)
 	assert.Equal(info.Transcoder, sess.Transcoder())
 	_, err := sess.OrchestratorOS.SaveData(context.Background(), "segment.ts", strings.NewReader("segment"), nil, time.Second)
-	require.ErrorContains(t, err, "localhost downloads are blocked")
+	require.ErrorContains(t, err, "connections to internal addresses are blocked")
 	assert.Zero(storageRequests.Load())
 
 	sender := &pm.MockSender{}

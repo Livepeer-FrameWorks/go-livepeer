@@ -32,7 +32,10 @@ func TestPush_WebhookRequestURL(t *testing.T) {
 			return
 		}
 		assert.Equal(req.URL, "http://example.com/live/seg.ts")
-		w.Write(nil)
+		auth := canonicalTestAuthResponse("seg")
+		if err := json.NewEncoder(w).Encode(auth); err != nil {
+			t.Error(err)
+		}
 	}))
 
 	defer ts.Close()
@@ -42,6 +45,7 @@ func TestPush_WebhookRequestURL(t *testing.T) {
 	AuthWebhookURL = mustParseUrl(t, ts.URL)
 	handler, reader, w := requestSetup(s)
 	req := httptest.NewRequest("POST", "/live/seg.ts", reader)
+	setTestIngestHeader(t, req, "url-token")
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
 	defer resp.Body.Close()

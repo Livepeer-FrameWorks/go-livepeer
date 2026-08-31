@@ -114,6 +114,15 @@ func TestIsWildcardIPAddr(t *testing.T) {
 	}
 }
 
+func TestIsLoopbackBindAddr(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:7935", "127.0.0.2", "[::1]:7935", "localhost:7935"} {
+		assert.True(t, isLoopbackBindAddr(addr), addr)
+	}
+	for _, addr := range []string{"0.0.0.0:7935", "[::]:7935", "10.0.0.1:7935", "cli.example.com:7935"} {
+		assert.False(t, isLoopbackBindAddr(addr), addr)
+	}
+}
+
 func TestDefaultAddrBareIP(t *testing.T) {
 	assert.Equal(t, "0.0.0.0:7935", defaultAddr("0.0.0.0", "127.0.0.1", "7935"))
 	assert.Equal(t, "[::]:7935", defaultAddr("::", "127.0.0.1", "7935"))
@@ -157,6 +166,23 @@ func TestParseLiveRunnerAddr(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = parseLiveRunnerAddr("ftp://go-livepeer:8935")
+	require.Error(t, err)
+}
+
+func TestParseCIDRList(t *testing.T) {
+	prefixes, err := parseCIDRList(" 127.0.0.0/8, ::1/128 ")
+	require.NoError(t, err)
+	require.Len(t, prefixes, 2)
+	require.Equal(t, "127.0.0.0/8", prefixes[0].String())
+	require.Equal(t, "::1/128", prefixes[1].String())
+
+	prefixes, err = parseCIDRList("")
+	require.NoError(t, err)
+	require.Empty(t, prefixes)
+
+	_, err = parseCIDRList("10.0.0.0/8,")
+	require.Error(t, err)
+	_, err = parseCIDRList("not-a-cidr")
 	require.Error(t, err)
 }
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/big"
@@ -59,6 +60,13 @@ type StreamParameters struct {
 	// distinct name.)
 	TenantID           string
 	FrameworksStreamID string
+
+	// Ingest authorization is fixed for the lifetime of an HTTP-push session.
+	// The raw capability is never retained by the gateway.
+	IngestJobTokenHash   [sha256.Size]byte
+	AuthorizedSourceIP   string
+	AuthorizedEdgeNodeID string
+	SpecDigest           string
 }
 
 func (s *StreamParameters) StreamID() string {

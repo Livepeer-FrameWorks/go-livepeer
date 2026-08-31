@@ -414,7 +414,7 @@ func TestCreateRTMPStreamHandlerCap(t *testing.T) {
 		connectionLock:  &sync.RWMutex{},
 		rtmpConnections: make(map[core.ManifestID]*rtmpConnection),
 	}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 	u := mustParseUrl(t, "http://hot/id1/secret")
 	oldMaxSessions := core.MaxSessions
 	core.MaxSessions = 1
@@ -451,7 +451,7 @@ func TestCreateRTMPStreamHandlerWebhook(t *testing.T) {
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 
 	AuthWebhookURL = mustParseUrl(t, "http://localhost:8938/notexisting")
 	u := mustParseUrl(t, "http://hot/something/id1")
@@ -692,7 +692,7 @@ func TestCreateRTMPStreamHandler(t *testing.T) {
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
 	handler := gotRTMPStreamHandler(s)
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 	endHandler := endRTMPStreamHandler(s)
 	// Test default path structure
 	expectedSid := core.MakeStreamIDFromString("ghijkl", "secretkey")
@@ -822,10 +822,7 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, &authWebhookResponse{
-		ManifestID: "override-manifest-id",
-		Profiles:   profiles,
-	}, "2718x1750")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 
 	// Test default path structure
 	expectedSid := core.MakeStreamIDFromString("callback-manifest-id", "abcdef")
@@ -841,11 +838,11 @@ func TestCreateRTMPStreamHandlerWithAuthHeader(t *testing.T) {
 	require.Equal(t, "P144p30fps16x9", sap.Profiles[0].Name)
 	require.Equal(t, "256x144", sap.Profiles[0].Resolution)
 	require.Equal(t, "400000", sap.Profiles[0].Bitrate)
-	require.Equal(t, profiles, gotReq.Profiles)
-	require.Equal(t, "2718x1750", gotReq.ContentResolution)
+	require.Empty(t, gotReq.Profiles)
+	require.Empty(t, gotReq.ContentResolution)
 }
 
-func TestCreateRTMPStreamHandlerWithAuthHeader_UsesCallbackProfiles(t *testing.T) {
+func TestCreateRTMPStreamHandlerUsesCallbackProfiles(t *testing.T) {
 	// Monkey patch rng to avoid unpredictability even when seeding
 	oldRandFunc := common.RandomIDGenerator
 	common.RandomIDGenerator = func(length uint) string {
@@ -886,17 +883,7 @@ func TestCreateRTMPStreamHandlerWithAuthHeader_UsesCallbackProfiles(t *testing.T
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, &authWebhookResponse{
-		ManifestID: "override-manifest-id",
-		Profiles: []ffmpeg.JsonProfile{
-			{
-				Name:    "P144p30fps16x9",
-				Bitrate: 400000,
-				Width:   256,
-				Height:  144,
-			},
-		},
-	}, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 
 	// Test default path structure
 	expectedSid := core.MakeStreamIDFromString("!!!!!Should be overridden!!!!", "abcdef")
@@ -915,7 +902,7 @@ func TestEndRTMPStreamHandler(t *testing.T) {
 	defer serverCleanup(s)
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 	handler := gotRTMPStreamHandler(s)
 	endHandler := endRTMPStreamHandler(s)
 	u := mustParseUrl(t, "rtmp://localhost")
@@ -1027,7 +1014,7 @@ func TestMultiStream(t *testing.T) {
 	defer cancel()
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
 	handler := gotRTMPStreamHandler(s)
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 
 	handleStream := func(i int) {
 		u := mustParseUrl(t, fmt.Sprintf("rtmp://localhost/%d", i))
@@ -1258,7 +1245,7 @@ func TestBroadcastSessionManagerWithStreamStartStop(t *testing.T) {
 
 	// create RTMPStream handler methods
 	s.RTMPSegmenter = &StubSegmenter{skip: true}
-	createSid := createRTMPStreamIDHandler(context.TODO(), s, nil, "")
+	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 	handler := gotRTMPStreamHandler(s)
 	endHandler := endRTMPStreamHandler(s)
 
@@ -1602,16 +1589,9 @@ func TestGetRemoteAddr(t *testing.T) {
 		{"remote empty string", "", "", ""},
 		{"remote malformed string", "1.2.3.4, nonsense", "", "1.2.3.4, nonsense"},
 
-		// --- X-Forwarded-For present (takes first comma-delimited token) ---
-		{"xff single IPv4 no port", "203.0.113.9:54321", "198.51.100.7", "198.51.100.7"},
-		{"xff single IPv4 with port", "203.0.113.9:54321", "198.51.100.7:8080", "198.51.100.7"},
-		{"xff single hostname with port", "203.0.113.9:54321", "edge.example.net:8443", "edge.example.net"},
-		{"xff single bracketed IPv6 with port", "203.0.113.9:54321", "[2001:db8::7]:9443", "2001:db8::7"},
-		{"xff IPv4-mapped IPv6 with port", "203.0.113.9:54321", "[::ffff:192.0.2.128]:12345", "::ffff:192.0.2.128"},
-		{"xff multiple entries with port", "203.0.113.9:54321", "198.51.100.7:8080, 10.0.0.1:80", "198.51.100.7"},
-		{"xff multiple entries no port", "203.0.113.9:54321", "198.51.100.7, 10.0.0.1", "198.51.100.7"},
-		{"xff first entry empty", "203.0.113.9:54321", ", 198.51.100.7", ""},
-		{"xff first entry has spaces", "203.0.113.9:54321", " \t\r198.51.100.7:8080 ", "198.51.100.7"},
+		// An untrusted direct peer cannot override its identity with XFF.
+		{"untrusted xff ignored", "203.0.113.9:54321", "198.51.100.7", "203.0.113.9"},
+		{"untrusted xff chain ignored", "203.0.113.9:54321", "198.51.100.7, 10.0.0.1", "203.0.113.9"},
 	}
 
 	for _, tt := range cases {

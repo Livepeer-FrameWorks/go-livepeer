@@ -716,7 +716,7 @@ func TestTranscodeSegmentLoopRejectsLoopbackStorage(t *testing.T) {
 			storage := n.StorageConfigs[md.AuthToken.SessionId]
 			require.NotNil(t, storage)
 			_, err := storage.OS.SaveData(context.Background(), "segment.ts", strings.NewReader("segment"), nil, time.Second)
-			require.ErrorContains(t, err, "localhost downloads are blocked")
+			require.ErrorContains(t, err, "connections to internal addresses are blocked")
 		})
 	}
 	require.Zero(t, hits.Load())

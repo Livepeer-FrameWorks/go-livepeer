@@ -838,7 +838,7 @@ func (n *LivepeerNode) transcodeSegmentLoop(logCtx context.Context, md *SegTrans
 	los := drivers.NodeStorage.NewSession(md.AuthToken.SessionId)
 
 	// determine appropriate OS to use
-	os := drivers.NewSessionWithHTTPClient(FromNetOsInfo(md.OS), localhostBlockedHTTPClient)
+	os := drivers.NewSessionWithHTTPClient(FromNetOsInfo(md.OS), internalBlockedHTTPClient)
 	if os == nil {
 		// no preference (or unknown pref), so use our own
 		os = los

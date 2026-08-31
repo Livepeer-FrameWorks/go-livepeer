@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -13,10 +12,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +27,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
-	lpmon "github.com/livepeer/go-livepeer/monitor"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/lpms/ffmpeg"
@@ -55,127 +51,6 @@ func requestSetup(s *LivepeerServer) (http.Handler, *strings.Reader, *httptest.R
 	reader := strings.NewReader(string(data))
 	writer := httptest.NewRecorder()
 	return handler, reader, writer
-}
-
-func TestPush_InvalidMediaAndLoopbackObjectStoreAreRejected(t *testing.T) {
-	s, cancel := setupServerWithCancel()
-	defer serverCleanup(s)
-	defer cancel()
-
-	var requests atomic.Int32
-	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		_, _ = io.Copy(io.Discard, r.Body)
-		r.Body.Close()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer store.Close()
-
-	config, err := json.Marshal(authWebhookResponse{
-		ManifestID:  "protected-stream",
-		Profiles:    []ffmpeg.JsonProfile{},
-		ObjectStore: "s3+http://access:secret@" + strings.TrimPrefix(store.URL, "http://") + "/bucket",
-	})
-	require.NoError(t, err)
-
-	push := func(seq string, body io.Reader, withConfig bool) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/live/protected-stream/"+seq+".ts", body)
-		if withConfig {
-			req.Header.Set(LIVERPEER_TRANSCODE_CONFIG_HEADER, string(config))
-		}
-		w := httptest.NewRecorder()
-		s.HandlePush(w, req)
-		return w
-	}
-
-	w := push("1", strings.NewReader(`{"not":"media"}`), true)
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
-	assert.Contains(t, w.Body.String(), "Invalid input media")
-	assert.Zero(t, requests.Load())
-	assert.Empty(t, s.rtmpConnections)
-
-	w = push("2", bytes.NewReader(validPushSegment(t)), true)
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "localhost downloads are blocked")
-	assert.Zero(t, requests.Load())
-
-	w = push("3", strings.NewReader(`{"not":"media"}`), false)
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
-	assert.Contains(t, w.Body.String(), "Invalid input media")
-	assert.Zero(t, requests.Load())
-}
-
-func TestPush_HeaderRecordObjectStoreRejectsLoopback(t *testing.T) {
-	s, cancel := setupServerWithCancel()
-	oldJsonPlaylistQuitTimeout := core.JsonPlaylistQuitTimeout
-	core.JsonPlaylistQuitTimeout = 0
-	defer func() { core.JsonPlaylistQuitTimeout = oldJsonPlaylistQuitTimeout }()
-	defer serverCleanup(s)
-	defer cancel()
-
-	oldRecordSegmentsMaxTimeout := recordSegmentsMaxTimeout
-	recordSegmentsMaxTimeout = 50 * time.Millisecond
-	defer func() { recordSegmentsMaxTimeout = oldRecordSegmentsMaxTimeout }()
-
-	var requests atomic.Int32
-	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		_, _ = io.Copy(io.Discard, r.Body)
-		r.Body.Close()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer store.Close()
-
-	config, err := json.Marshal(authWebhookResponse{
-		ManifestID:        "protected-recording",
-		Profiles:          []ffmpeg.JsonProfile{},
-		RecordObjectStore: "s3+http://access:secret@" + strings.TrimPrefix(store.URL, "http://") + "/bucket",
-	})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/live/protected-recording/1.ts", bytes.NewReader(validPushSegment(t)))
-	req.Header.Set(LIVERPEER_TRANSCODE_CONFIG_HEADER, string(config))
-	w := httptest.NewRecorder()
-	s.HandlePush(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Never(t, func() bool { return requests.Load() > 0 }, 100*time.Millisecond, 10*time.Millisecond)
-}
-
-func TestPush_HeaderObjectStoreRejectsUnsafeDriversBeforeCreatingStream(t *testing.T) {
-	for _, field := range []string{"objectStore", "recordObjectStore"} {
-		for _, scheme := range []string{"path", "file", "gs"} {
-			t.Run(field+"/"+scheme, func(t *testing.T) {
-				s, cancel := setupServerWithCancel()
-				defer serverCleanup(s)
-				defer cancel()
-
-				storePath := filepath.Join(t.TempDir(), "store")
-				storeURL := storePath
-				if scheme == "file" {
-					storeURL = (&url.URL{Scheme: "file", Path: storePath}).String()
-				} else if scheme == "gs" {
-					storeURL = "gs://credentials@bucket"
-				}
-				config, err := json.Marshal(map[string]interface{}{
-					"manifestID": "local-store",
-					"profiles":   []ffmpeg.JsonProfile{},
-					field:        storeURL,
-				})
-				require.NoError(t, err)
-
-				req := httptest.NewRequest(http.MethodPost, "/live/local-store/1.ts", bytes.NewReader(validPushSegment(t)))
-				req.Header.Set(LIVERPEER_TRANSCODE_CONFIG_HEADER, string(config))
-				w := httptest.NewRecorder()
-				s.HandlePush(w, req)
-
-				require.Equal(t, http.StatusInternalServerError, w.Code)
-				assert.Contains(t, w.Body.String(), "Could not create stream ID")
-				assert.Empty(t, s.rtmpConnections)
-				_, err = os.Stat(storePath)
-				require.ErrorIs(t, err, os.ErrNotExist)
-			})
-		}
-	}
 }
 
 func TestPush_ShouldReturn422ForNonRetryable(t *testing.T) {
@@ -802,11 +677,10 @@ func TestPush_SetVideoProfileFormats(t *testing.T) {
 	}
 
 	hookCalled := 0
-	// Sanity check that default profile with webhook is copied
-	// Checking since there is special handling for the default set of profiles
-	// within the webhook handler.
+	// The auth webhook's canonical profile is copied before the input format is
+	// applied, without mutating the shared defaults.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := authWebhookResponse{ManifestID: "intweb"}
+		auth := canonicalTestAuthResponse("intweb")
 		val, err := json.Marshal(auth)
 		assert.Nil(err, "invalid auth webhook response")
 		w.Write(val)
@@ -819,6 +693,7 @@ func TestPush_SetVideoProfileFormats(t *testing.T) {
 
 	h, r, w = requestSetup(s)
 	req = httptest.NewRequest("POST", "/live/web/0.mp4", r)
+	setTestIngestHeader(t, req, "format-token")
 	h.ServeHTTP(w, req)
 	resp = w.Result()
 	defer resp.Body.Close()
@@ -830,17 +705,20 @@ func TestPush_SetVideoProfileFormats(t *testing.T) {
 	cxn, ok = s.rtmpConnections["intweb"]
 	assert.True(ok, "stream did not exist")
 	assert.Equal(ffmpeg.FormatMP4, cxn.profile.Format)
-	assert.Len(cxn.params.Profiles, 2)
+	assert.Len(cxn.params.Profiles, 1)
 	assert.Len(BroadcastJobVideoProfiles, 2)
-	for i, p := range cxn.params.Profiles {
+	for _, p := range cxn.params.Profiles {
 		assert.Equal(ffmpeg.FormatMP4, p.Format)
-		assert.Equal(ffmpeg.FormatNone, BroadcastJobVideoProfiles[i].Format)
+	}
+	for _, p := range BroadcastJobVideoProfiles {
+		assert.Equal(ffmpeg.FormatNone, p.Format)
 	}
 	// Server has empty sessions list, so it will return 503
 	assert.Equal(503, resp.StatusCode)
 
 	h, r, w = requestSetup(s)
 	req = httptest.NewRequest("POST", "/live/web/1.mp4", r)
+	setTestIngestHeader(t, req, "format-token")
 	h.ServeHTTP(w, req)
 	resp = w.Result()
 	body, _ := ioutil.ReadAll(resp.Body)
@@ -872,7 +750,7 @@ func TestPush_ShouldRemoveSessionAfterTimeoutIfInternalMIDIsUsed(t *testing.T) {
 
 	hookCalled := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := authWebhookResponse{ManifestID: "intmid"}
+		auth := canonicalTestAuthResponse("intmid")
 		val, err := json.Marshal(auth)
 		assert.Nil(err, "invalid auth webhook response")
 		w.Write(val)
@@ -885,6 +763,7 @@ func TestPush_ShouldRemoveSessionAfterTimeoutIfInternalMIDIsUsed(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/live/extmid1/1.ts", bytes.NewReader(validPushSegment(t)))
+	setTestIngestHeader(t, req, "timeout-token")
 	s.HandlePush(w, req)
 	resp := w.Result()
 	resp.Body.Close()
@@ -1174,6 +1053,7 @@ func TestPush_ForAuthWebhookFailure(t *testing.T) {
 	defer func() { AuthWebhookURL = oldURL }()
 	AuthWebhookURL = &url.URL{Path: "notaurl"}
 	req := httptest.NewRequest("POST", "/live/seg.ts", reader)
+	setTestIngestHeader(t, req, "failure-token")
 
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
@@ -1197,7 +1077,7 @@ func TestPush_ResolutionWithoutContentResolutionHeader(t *testing.T) {
 	server.rtmpConnections = map[core.ManifestID]*rtmpConnection{}
 	handler, reader, w := requestSetup(server)
 	req := httptest.NewRequest("POST", "/live/seg.ts", reader)
-	defaultRes := "0x0"
+	defaultRes := "640x360"
 
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
@@ -1211,7 +1091,7 @@ func TestPush_ResolutionWithoutContentResolutionHeader(t *testing.T) {
 	server.rtmpConnections = map[core.ManifestID]*rtmpConnection{}
 }
 
-func TestPush_ResolutionWithContentResolutionHeader(t *testing.T) {
+func TestPush_ContentResolutionHeaderIsDiagnosticOnly(t *testing.T) {
 	assert := assert.New(t)
 
 	// wait for any earlier tests to complete
@@ -1223,8 +1103,7 @@ func TestPush_ResolutionWithContentResolutionHeader(t *testing.T) {
 	server.rtmpConnections = map[core.ManifestID]*rtmpConnection{}
 	handler, reader, w := requestSetup(server)
 	req := httptest.NewRequest("POST", "/live/seg.ts", reader)
-	resolution := "123x456"
-	req.Header.Set("Content-Resolution", resolution)
+	req.Header.Set("Content-Resolution", "123x456")
 
 	handler.ServeHTTP(w, req)
 	resp := w.Result()
@@ -1232,182 +1111,10 @@ func TestPush_ResolutionWithContentResolutionHeader(t *testing.T) {
 
 	assert.Len(server.rtmpConnections, 1)
 	for _, cxn := range server.rtmpConnections {
-		assert.Equal(resolution, cxn.profile.Resolution)
+		assert.Equal("640x360", cxn.profile.Resolution)
 	}
 
 	server.rtmpConnections = map[core.ManifestID]*rtmpConnection{}
-}
-
-func TestPush_OSPerStream(t *testing.T) {
-	oldjpqt := core.JsonPlaylistQuitTimeout
-	defer func() {
-		core.JsonPlaylistQuitTimeout = oldjpqt
-	}()
-	core.JsonPlaylistQuitTimeout = 0 * time.Second
-
-	lpmon.NodeID = "testNode"
-	drivers.Testing = true
-	assert := assert.New(t)
-	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
-	n, _ := core.NewLivepeerNode(nil, "./tmp", nil)
-	serverCtx, serverCancel := context.WithCancel(context.Background())
-	s, _ := NewLivepeerServer(serverCtx, "127.0.0.1:1939", n, true, "")
-	s.SetContextFromUnitTest(serverCtx)
-	defer serverCleanup(s)
-
-	whts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		out, _ := ioutil.ReadAll(r.Body)
-		var req authWebhookReq
-		err := json.Unmarshal(out, &req)
-		if err != nil {
-			glog.Error("Error parsing URL: ", err)
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		assert.Equal(req.URL, "http://example.com/live/sess1/1.ts")
-		w.Write([]byte(`{"manifestID":"OSTEST01", "objectStore": "memory://store1", "recordObjectStore": "memory://store2"}`))
-	}))
-
-	defer whts.Close()
-	oldURL := AuthWebhookURL
-	defer func() { AuthWebhookURL = oldURL }()
-	AuthWebhookURL = mustParseUrl(t, whts.URL)
-
-	ts, mux := stubNonLoopbackTLSServer(t)
-	defer ts.Close()
-
-	// sometimes LivepeerServer needs time  to start
-	// esp if this is the only test in the suite being run (eg, via `-run)
-	time.Sleep(10 * time.Millisecond)
-
-	oldProfs := BroadcastJobVideoProfiles
-	defer func() { BroadcastJobVideoProfiles = oldProfs }()
-	BroadcastJobVideoProfiles = []ffmpeg.VideoProfile{ffmpeg.P720p25fps16x9}
-
-	sd := &stubDiscovery{}
-	sd.infos = []*net.OrchestratorInfo{{Transcoder: ts.URL, AuthToken: stubAuthToken}}
-	s.LivepeerNode.OrchestratorPool = sd
-
-	dummyRes := func(tSegData []*net.TranscodedSegmentData) *net.TranscodeResult {
-		return &net.TranscodeResult{
-			Result: &net.TranscodeResult_Data{
-				Data: &net.TranscodeData{
-					Segments: tSegData,
-				},
-			},
-		}
-	}
-	segPath := "/random"
-	tSegData := []*net.TranscodedSegmentData{{Url: ts.URL + segPath, Pixels: 100}}
-	tr := dummyRes(tSegData)
-	buf, err := proto.Marshal(tr)
-	require.Nil(t, err)
-
-	mux.HandleFunc("/segment", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write(buf)
-	})
-	mux.HandleFunc(segPath, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("transcoded binary data"))
-	})
-
-	handler, reader, w := requestSetup(s)
-	req := httptest.NewRequest("POST", "/live/sess1/1.ts", reader)
-	req.Header.Set("Accept", "multipart/mixed")
-	handler.ServeHTTP(w, req)
-	resp := w.Result()
-	defer resp.Body.Close()
-	assert.NotNil(drivers.TestMemoryStorages)
-	assert.Contains(drivers.TestMemoryStorages, "store1")
-	assert.Contains(drivers.TestMemoryStorages, "store2")
-	store1 := drivers.TestMemoryStorages["store1"]
-	sess1 := store1.GetSession("OSTEST01")
-	assert.NotNil(sess1)
-	ctx := context.Background()
-	fi, err := sess1.ReadData(ctx, "OSTEST01/source/1.ts")
-	assert.Nil(err)
-	assert.NotNil(fi)
-	body, _ := ioutil.ReadAll(fi.Body)
-	assert.Equal(validPushSegment(t), body)
-	assert.Equal("OSTEST01/source/1.ts", fi.Name)
-
-	fi, err = sess1.ReadData(ctx, "OSTEST01/P720p25fps16x9/1.ts")
-	assert.Nil(err)
-	assert.NotNil(fi)
-	body, _ = ioutil.ReadAll(fi.Body)
-	assert.Equal("transcoded binary data", string(body))
-
-	// Saving to record store is async so sleep for a bit
-	time.Sleep(100 * time.Millisecond)
-
-	store2 := drivers.TestMemoryStorages["store2"]
-	sess2 := store2.GetSession("sess1/" + lpmon.NodeID)
-	assert.NotNil(sess2)
-	fi, err = sess2.ReadData(ctx, fmt.Sprintf("sess1/%s/source/1.ts", lpmon.NodeID))
-	assert.Nil(err)
-	assert.NotNil(fi)
-	body, _ = ioutil.ReadAll(fi.Body)
-	assert.Equal(validPushSegment(t), body)
-
-	fi, err = sess2.ReadData(ctx, fmt.Sprintf("sess1/%s/P720p25fps16x9/1.ts", lpmon.NodeID))
-	assert.Nil(err)
-	assert.NotNil(fi)
-	body, _ = ioutil.ReadAll(fi.Body)
-	assert.Equal("transcoded binary data", string(body))
-
-	assert.Equal(200, resp.StatusCode)
-	body, _ = ioutil.ReadAll(resp.Body)
-	assert.True(len(body) > 0)
-
-	// check that segment with 0-frame is not saved to recording store
-	w = httptest.NewRecorder()
-	breader := bytes.NewReader(zero_frame_ts)
-	req = httptest.NewRequest("POST", "/live/sess1/2.ts", breader)
-	req.Header.Set("Accept", "multipart/mixed")
-	handler.ServeHTTP(w, req)
-	resp = w.Result()
-	defer resp.Body.Close()
-	zfr, err := sess1.ReadData(ctx, "OSTEST01/source/2.ts")
-	assert.Nil(err)
-	zfb, zerr := ioutil.ReadAll(zfr.Body)
-	assert.Nil(zerr)
-	assert.Equal(zero_frame_ts, zfb)
-	_, err = sess2.ReadData(ctx, "OSTEST01/source/2.ts")
-	assert.Error(err, "Not found")
-	assert.Equal(200, resp.StatusCode)
-	assert.Equal(int64(-1), resp.ContentLength)
-	mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	assert.Equal("multipart/mixed", mediaType)
-	assert.Nil(err)
-	mr := multipart.NewReader(resp.Body, params["boundary"])
-	i := 0
-	for {
-		p, merr := mr.NextPart()
-		if merr == io.EOF {
-			break
-		}
-		assert.Nil(merr)
-		mediaType, _, err := mime.ParseMediaType(p.Header.Get("Content-Type"))
-		assert.Nil(err)
-		disposition, dispParams, err := mime.ParseMediaType(p.Header.Get("Content-Disposition"))
-		assert.Nil(err)
-		body, merr := ioutil.ReadAll(p)
-		assert.Nil(merr)
-		assert.True(len(body) > 0)
-		assert.Equal("video/mp2t", mediaType)
-		assert.Equal("attachment", disposition)
-		assert.Equal("P720p25fps16x9_2.ts", dispParams["filename"])
-		assert.Equal(zero_frame_ts, body)
-		i++
-	}
-	assert.Equal(len(BroadcastJobVideoProfiles), i)
-
-	fi, err = sess2.ReadData(ctx, fmt.Sprintf("sess1/%s/source/2.ts", lpmon.NodeID))
-	assert.EqualError(err, "Not found")
-	assert.Nil(fi)
-
-	serverCancel()
 }
 
 func TestPush_ConcurrentSegments(t *testing.T) {
@@ -1474,7 +1181,7 @@ func TestPush_ReuseIntmidWithDiffExtmid(t *testing.T) {
 
 	hookCalled := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := authWebhookResponse{ManifestID: "intmid"}
+		auth := canonicalTestAuthResponse("intmid")
 		val, err := json.Marshal(auth)
 		assert.Nil(err, "invalid auth webhook response")
 		w.Write(val)
@@ -1487,6 +1194,7 @@ func TestPush_ReuseIntmidWithDiffExtmid(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/live/extmid1/0.ts", reader)
+	setTestIngestHeader(t, req, "reuse-token")
 	s.HandlePush(w, req)
 	resp := w.Result()
 	assert.Equal(503, resp.StatusCode)
@@ -1503,6 +1211,7 @@ func TestPush_ReuseIntmidWithDiffExtmid(t *testing.T) {
 
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/live/extmid2/0.ts", bytes.NewReader(validPushSegment(t)))
+	setTestIngestHeader(t, req, "reuse-token")
 	s.HandlePush(w, req)
 	resp = w.Result()
 	assert.Equal(503, resp.StatusCode)

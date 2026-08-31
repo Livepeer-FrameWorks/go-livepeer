@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"io/ioutil"
 	"math/big"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -260,7 +260,7 @@ func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) 
 	s.HTTPMux.Handle("/healthz", s.healthzHandler())
 
 	//LPMS handlers for handling RTMP video
-	s.LPMS.HandleRTMPPublish(createRTMPStreamIDHandler(ctx, s, nil, ""), gotRTMPStreamHandler(s), endRTMPStreamHandler(s))
+	s.LPMS.HandleRTMPPublish(createRTMPStreamIDHandler(ctx, s), gotRTMPStreamHandler(s), endRTMPStreamHandler(s))
 	s.LPMS.HandleRTMPPlay(getRTMPStreamHandler(s))
 
 	//LPMS handler for handling HLS video play
@@ -296,15 +296,25 @@ func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) 
 }
 
 // RTMP Publish Handlers
-func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHeaderConfig *authWebhookResponse, contentResolution string) func(url *url.URL) (strmID stream.AppData, e error) {
+type httpPushAuthContext struct {
+	config   *ingestJobConfig
+	source   ingestSource
+	remoteIP string
+}
+
+func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer) func(url *url.URL) (strmID stream.AppData, e error) {
+	return createStreamIDHandler(_ctx, s, nil)
+}
+
+func createHTTPPushStreamIDHandler(_ctx context.Context, s *LivepeerServer, ingest *httpPushAuthContext) func(url *url.URL) (strmID stream.AppData, e error) {
+	return createStreamIDHandler(_ctx, s, ingest)
+}
+
+func createStreamIDHandler(_ctx context.Context, s *LivepeerServer, ingest *httpPushAuthContext) func(url *url.URL) (strmID stream.AppData, e error) {
 	return func(url *url.URL) (strmID stream.AppData, e error) {
-		//Check HTTP header for ManifestID
-		//If ManifestID is passed in HTTP header, use that one
-		//Else check webhook for ManifestID
-		//If ManifestID is returned from webhook, use it
-		//Else check URL for ManifestID
-		//If ManifestID is passed in URL, use that one
-		//Else create one
+		// The strict HTTP-ingest webhook is authoritative. Legacy RTMP publish
+		// retains its separate webhook behavior and otherwise derives the ID from
+		// the URL.
 		var resp *authWebhookResponse
 		var mid core.ManifestID
 		var extStreamID, sessionID string
@@ -314,18 +324,41 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 		var oss, ross drivers.OSSession
 		profiles := []ffmpeg.VideoProfile{}
 		var VerificationFreq uint
+		var ingestResp *ingestAuthResponse
 		nonce := common.RandomUint64()
 
 		// do not replace captured _ctx variable
 		ctx := clog.AddNonce(_ctx, nonce)
-		if resp, err = authenticateStream(AuthWebhookURL, url.String(), authHeaderConfig, contentResolution); err != nil {
+		if ingest != nil {
+			if AuthWebhookURL != nil {
+				ingestResp, err = authenticateIngestStream(AuthWebhookURL, url.String(), ingest.config, ingest.source, ingest.remoteIP)
+			}
+			if err == nil && ingestResp != nil {
+				resp = &authWebhookResponse{
+					ManifestID: ingestResp.ManifestID,
+					StreamID:   ingestResp.StreamID,
+					Profiles:   ingestResp.Profiles,
+					TenantID:   ingestResp.TenantID,
+					Workload:   ingestResp.Workload,
+					DeadlineMs: ingestResp.DeadlineMs,
+					MinSpeed:   ingestResp.MinSpeed,
+				}
+			} else if err == nil && ingest.config != nil {
+				// Without an auth webhook these fields remain local configuration.
+				// No identity or storage fields can be supplied by this type.
+				resp = &authWebhookResponse{
+					Profiles:   ingest.config.Profiles,
+					Workload:   ingest.config.Workload,
+					DeadlineMs: ingest.config.DeadlineMs,
+					MinSpeed:   ingest.config.MinSpeed,
+				}
+			}
+		} else {
+			resp, err = authenticateStream(AuthWebhookURL, url.String(), nil, "")
+		}
+		if err != nil {
 			clog.Errorf(ctx, fmt.Sprintf("Forbidden: Authentication denied for streamID url=%s err=%q", url.String(), err))
 			return nil, errForbidden
-		}
-
-		configFromHeader := resp == nil && authHeaderConfig != nil
-		if configFromHeader {
-			resp = authHeaderConfig
 		}
 
 		if resp != nil {
@@ -354,12 +387,7 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 
 			// set OS if it was provided
 			if resp.ObjectStore != "" {
-				if configFromHeader {
-					os, err = drivers.ParseOSURLWithHTTPClient(
-						resp.ObjectStore, false, core.LocalhostBlockedHTTPClient())
-				} else {
-					os, err = drivers.ParseOSURL(resp.ObjectStore, false)
-				}
+				os, err = drivers.ParseOSURL(resp.ObjectStore, false)
 				if err != nil {
 					errMsg := fmt.Sprintf("Failed to parse object store url for streamID url=%s err=%q", url.String(), err)
 					clog.Errorf(ctx, errMsg)
@@ -368,12 +396,7 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 			}
 			// set Recording OS if it was provided
 			if resp.RecordObjectStore != "" {
-				if configFromHeader {
-					ros, err = drivers.ParseOSURLWithHTTPClient(
-						resp.RecordObjectStore, true, core.LocalhostBlockedHTTPClient())
-				} else {
-					ros, err = drivers.ParseOSURL(resp.RecordObjectStore, true)
-				}
+				ros, err = drivers.ParseOSURL(resp.RecordObjectStore, true)
 				if err != nil {
 					errMsg := fmt.Sprintf("Failed to parse recording object store url for streamID url=%s err=%q", url.String(), err)
 					clog.Errorf(ctx, errMsg)
@@ -426,7 +449,7 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 			fwStreamID = resp.StreamID
 		}
 
-		return &core.StreamParameters{
+		params := &core.StreamParameters{
 			ManifestID:       mid,
 			ExternalStreamID: extStreamID,
 			SessionID:        sessionID,
@@ -439,7 +462,21 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 			Nonce:              nonce,
 			TenantID:           fwTenantID,
 			FrameworksStreamID: fwStreamID,
-		}, nil
+		}
+		if ingestResp != nil {
+			params.Workload = ingestResp.Workload
+			params.DeadlineMs = ingestResp.DeadlineMs
+			params.MinSpeed = ingestResp.MinSpeed
+			params.IngestJobTokenHash = sha256.Sum256([]byte(ingest.config.JobToken))
+			params.AuthorizedSourceIP = ingest.remoteIP
+			params.AuthorizedEdgeNodeID = ingestResp.AuthorizedEdgeNodeID
+			params.SpecDigest = ingestResp.SpecDigest
+		} else if ingest != nil && ingest.config != nil {
+			params.Workload = ingest.config.Workload
+			params.DeadlineMs = ingest.config.DeadlineMs
+			params.MinSpeed = ingest.config.MinSpeed
+		}
+		return params, nil
 	}
 }
 
@@ -782,11 +819,16 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authHeaderConfig, err := getTranscodeConfiguration(r)
+	ingestConfig, err := parseIngestJobConfig(r)
 	if err != nil {
 		httpErr := fmt.Sprintf(`failed to parse transcode config header: %q`, err)
 		glog.Error(httpErr)
 		http.Error(w, httpErr, http.StatusBadRequest)
+		return
+	}
+	remoteAddr, err := ingestRemoteIP(r)
+	if AuthWebhookURL != nil && (err != nil || ingestConfig == nil || ingestConfig.JobToken == "") {
+		errorOut(http.StatusForbidden, "Missing or invalid ingest authorization")
 		return
 	}
 
@@ -814,7 +856,6 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	if mid != "" {
 		ctx = clog.AddManifestID(ctx, string(mid))
 	}
-	remoteAddr := getRemoteAddr(r)
 	ctx = clog.AddVal(ctx, clog.ClientIP, remoteAddr)
 
 	sliceFromStr := r.Header.Get("Content-Slice-From")
@@ -843,10 +884,6 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 			To:   sliceToDur,
 		}
 	}
-	if authHeaderConfig != nil {
-		segPar.ForceSessionReinit = authHeaderConfig.ForceSessionReinit
-	}
-
 	now := time.Now()
 	if mid == "" {
 		errorOut(http.StatusBadRequest, "Bad URL url=%s", r.URL)
@@ -864,6 +901,13 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	s.connectionLock.RUnlock()
 	ctx = clog.AddManifestID(ctx, string(mid))
 	if exists && cxn != nil {
+		if AuthWebhookURL != nil {
+			tokenHash := sha256.Sum256([]byte(ingestConfig.JobToken))
+			if tokenHash != cxn.params.IngestJobTokenHash || remoteAddr != cxn.params.AuthorizedSourceIP {
+				errorOut(http.StatusForbidden, "Ingest authorization changed for active stream")
+				return
+			}
+		}
 		s.connectionLock.Lock()
 		cxn.lastUsed = now
 		s.connectionLock.Unlock()
@@ -897,7 +941,16 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 
 	// Check for presence and register if a fresh cxn
 	if !exists {
-		appData, err := (createRTMPStreamIDHandler(ctx, s, authHeaderConfig, r.Header.Get("Content-Resolution")))(r.URL)
+		source := ingestSource{
+			Width:       mediaFormat.Width,
+			Height:      mediaFormat.Height,
+			FPS:         float64(mediaFormat.FPS),
+			Codec:       mediaFormat.Vcodec,
+			PixelFormat: pixelFormatName(mediaFormat.PixFormat),
+		}
+		appData, err := (createHTTPPushStreamIDHandler(ctx, s, &httpPushAuthContext{
+			config: ingestConfig, remoteIP: remoteAddr, source: source,
+		}))(r.URL)
 		if err != nil {
 			if errors.Is(err, errForbidden) {
 				errorOut(http.StatusForbidden, "Could not create stream ID: url=%s", r.URL)
@@ -908,13 +961,7 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		params := streamParams(appData)
-		if authHeaderConfig != nil {
-			params.TimeoutMultiplier = authHeaderConfig.TimeoutMultiplier
-			params.Workload = authHeaderConfig.Workload
-			params.DeadlineMs = authHeaderConfig.DeadlineMs
-			params.MinSpeed = authHeaderConfig.MinSpeed
-		}
-		params.Resolution = r.Header.Get("Content-Resolution")
+		params.Resolution = fmt.Sprintf("%dx%d", mediaFormat.Width, mediaFormat.Height)
 		params.Format = format
 		s.connectionLock.RLock()
 		_, cxnExists := s.getActiveRtmpConnectionUnsafe(params.ManifestID)
@@ -952,7 +999,16 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 			if err != errAlreadyExists {
 				errorOut(http.StatusInternalServerError, "http push error url=%s err=%q", r.URL, err)
 				return
-			} // else we continue with the old cxn
+			}
+			// A concurrent first segment may have created this connection after
+			// our initial lookup. Never attach a differently authorized request.
+			if AuthWebhookURL != nil {
+				tokenHash := sha256.Sum256([]byte(ingestConfig.JobToken))
+				if tokenHash != cxn.params.IngestJobTokenHash || remoteAddr != cxn.params.AuthorizedSourceIP {
+					errorOut(http.StatusForbidden, "Ingest authorization changed for active stream")
+					return
+				}
+			}
 		} else {
 			// Start a watchdog to remove session after a period of inactivity
 			ticker := time.NewTicker(httpPushTimeout)
@@ -1724,23 +1780,6 @@ func (s *LivepeerServer) LatestPlaylist() core.PlaylistManager {
 func shouldStopStream(err error) bool {
 	_, ok := err.(pm.ErrSenderValidation)
 	return ok
-}
-
-func getRemoteAddr(r *http.Request) string {
-	addr := r.RemoteAddr
-	if proxiedAddr := r.Header.Get("X-Forwarded-For"); proxiedAddr != "" {
-		addr = strings.Split(proxiedAddr, ",")[0]
-	}
-
-	// addr is typically in the format "ip:port"
-	// Need to extract just the IP. Handle IPv6 too.
-	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		// probably not a real IP
-		return addr
-	}
-
-	return host
 }
 
 func mediaCompatible(a, b ffmpeg.MediaFormatInfo) bool {

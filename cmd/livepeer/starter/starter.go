@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/user"
@@ -170,6 +171,8 @@ type LivepeerConfig struct {
 	AIModelsDir                *string
 	Objectstore                *string
 	Recordstore                *string
+	OSAllowInternalCIDRs       *string
+	TrustedProxyCIDRs          *string
 	FVfailGsBucket             *string
 	FVfailGsKey                *string
 	AuthWebhookURL             *string
@@ -327,6 +330,8 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultDatadir := ""
 	defaultObjectstore := ""
 	defaultRecordstore := ""
+	defaultOSAllowInternalCIDRs := ""
+	defaultTrustedProxyCIDRs := "127.0.0.0/8,::1/128"
 
 	// Fast Verification GS bucket:
 	defaultFVfailGsBucket := ""
@@ -463,9 +468,11 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		LocalVerify: &defaultLocalVerify,
 
 		// Storage:
-		Datadir:     &defaultDatadir,
-		Objectstore: &defaultObjectstore,
-		Recordstore: &defaultRecordstore,
+		Datadir:              &defaultDatadir,
+		Objectstore:          &defaultObjectstore,
+		Recordstore:          &defaultRecordstore,
+		OSAllowInternalCIDRs: &defaultOSAllowInternalCIDRs,
+		TrustedProxyCIDRs:    &defaultTrustedProxyCIDRs,
 
 		// Fast Verification GS bucket:
 		FVfailGsBucket: &defaultFVfailGsBucket,
@@ -1664,6 +1671,20 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		}
 	}
 
+	allowedInternalOSPrefixes, err := parseCIDRList(*cfg.OSAllowInternalCIDRs)
+	if err != nil {
+		glog.Errorf("Invalid -osAllowInternalCIDRs: %v", err)
+		return
+	}
+	core.SetAllowedInternalOSPrefixes(allowedInternalOSPrefixes)
+
+	trustedProxyPrefixes, err := parseCIDRList(*cfg.TrustedProxyCIDRs)
+	if err != nil {
+		glog.Errorf("Invalid -trustedProxyCIDRs: %v", err)
+		return
+	}
+	server.SetTrustedProxyPrefixes(trustedProxyPrefixes)
+
 	if *cfg.Objectstore != "" {
 		prepared, err := drivers.PrepareOSURL(*cfg.Objectstore)
 		if err != nil {
@@ -1942,6 +1963,10 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	}
 	if isWildcardIPAddr(*cfg.CliAddr) {
 		glog.Warningf("Binding -cliAddr to a wildcard address (%s) exposes the CLI server on all network interfaces; use a loopback address or restrict access with a firewall", *cfg.CliAddr)
+	}
+	if *cfg.CliTxRoutes && !isLoopbackBindAddr(*cfg.CliAddr) {
+		glog.Errorf("-enableCliTxRoutes requires a loopback -cliAddr, got %q", *cfg.CliAddr)
+		return
 	}
 
 	// Apply default capabilities if not running as a transcoder.
@@ -2485,6 +2510,18 @@ func isWildcardIPAddr(addr string) bool {
 	return ip != nil && ip.IsUnspecified()
 }
 
+func isLoopbackBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = trimIPv6Brackets(addr)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func trimIPv6Brackets(addr string) string {
 	if len(addr) >= 2 && addr[0] == '[' && addr[len(addr)-1] == ']' {
 		return addr[1 : len(addr)-1]
@@ -2781,4 +2818,25 @@ func parseLiveRunnerAddr(addr string) (*url.URL, error) {
 		return nil, fmt.Errorf("scheme must be http or https")
 	}
 	return parsed, nil
+}
+
+func parseCIDRList(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			return nil, errors.New("CIDR list contains an empty entry")
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", value, err)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
