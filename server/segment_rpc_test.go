@@ -146,7 +146,7 @@ func TestServeSegment_RejectsLoopbackURI(t *testing.T) {
 		},
 		OrchestratorInfo: &net.OrchestratorInfo{AuthToken: stubAuthToken},
 	}
-	creds, err := genSegCreds(s, &stream.HLSSegment{Data: []byte("segment")}, nil, false)
+	creds, err := genSegCreds(s, &stream.HLSSegment{Data: []byte("segment")}, nil)
 	require.NoError(t, err)
 
 	oldStorage := drivers.NodeStorage

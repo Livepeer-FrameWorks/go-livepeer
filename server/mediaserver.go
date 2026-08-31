@@ -315,7 +315,6 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 		profiles := []ffmpeg.VideoProfile{}
 		var VerificationFreq uint
 		nonce := common.RandomUint64()
-		configFromHeader := webhookResponseOverride != nil
 
 		// do not replace captured _ctx variable
 		ctx := clog.AddNonce(_ctx, nonce)
@@ -324,7 +323,8 @@ func createRTMPStreamIDHandler(_ctx context.Context, s *LivepeerServer, authHead
 			return nil, errForbidden
 		}
 
-		if resp == nil && authHeaderConfig != nil {
+		configFromHeader := resp == nil && authHeaderConfig != nil
+		if configFromHeader {
 			resp = authHeaderConfig
 		}
 
