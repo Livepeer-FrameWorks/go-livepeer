@@ -7,6 +7,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/go-livepeer/pm"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,4 +162,15 @@ func TestSubsetScores(t *testing.T) {
 	require.Equal(t, 2.0, out[a])
 	_, ok := out[b]
 	require.False(t, ok, "missing endpoint must be omitted, not defaulted")
+}
+
+func TestOrchPerfQueueIsBounded(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = rdb.Close() })
+	store := &orchHealthStore{rdb: rdb, perfQueue: make(chan perfObservation, 1)}
+	// Mark initialization complete without starting workers so saturation is deterministic.
+	store.perfQueueOnce.Do(func() {})
+	observation := perfObservation{endpoint: "https://orch.example:8935"}
+	require.True(t, store.enqueuePerf(observation))
+	require.False(t, store.enqueuePerf(observation))
 }

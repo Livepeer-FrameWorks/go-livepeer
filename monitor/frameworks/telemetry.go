@@ -11,6 +11,7 @@ package frameworks
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -63,6 +64,14 @@ func Init(ctx context.Context) error {
 	}
 	addr := strings.TrimSpace(os.Getenv("FRAMEWORKS_DECKLOG_GRPC_ADDR"))
 	tlsMode := strings.TrimSpace(os.Getenv("FRAMEWORKS_DECKLOG_TLS_MODE"))
+	allowInsecure := true
+	if addr != "" {
+		var err error
+		allowInsecure, err = decklogAllowsInsecure(tlsMode)
+		if err != nil {
+			return err
+		}
+	}
 	// Reuse the platform service token already injected for service-to-service
 	// auth. FRAMEWORKS_DECKLOG_AUTH_TOKEN is an explicit override, not a
 	// second required credential path.
@@ -73,7 +82,7 @@ func Init(ctx context.Context) error {
 
 	cfg := decklog.BatchedClientConfig{
 		Target:        addr,
-		AllowInsecure: tlsMode != "mtls" && tlsMode != "tls",
+		AllowInsecure: allowInsecure,
 		CACertFile:    strings.TrimSpace(os.Getenv("GRPC_TLS_CA_PATH")),
 		Source:        "livepeer-gateway",
 		ServiceToken:  authToken,
@@ -313,23 +322,27 @@ func buildVantage(resolvedIP string, dialed bool, now time.Time) *pb.Orchestrato
 }
 
 func hostFromURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return ""
 	}
-	// Cheap host extraction without pulling net/url for every event in a hot
-	// loop. Format: scheme://host[:port]/...
-	s := rawURL
-	if i := strings.Index(s, "://"); i != -1 {
-		s = s[i+3:]
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "//" + rawURL
 	}
-	if i := strings.Index(s, "/"); i != -1 {
-		s = s[:i]
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
 	}
-	if i := strings.LastIndex(s, ":"); i != -1 {
-		// Strip port, but keep IPv6 brackets intact.
-		if !strings.Contains(s, "]") {
-			s = s[:i]
-		}
+	return parsed.Hostname()
+}
+
+func decklogAllowsInsecure(mode string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "disabled", "insecure":
+		return true, nil
+	case "tls", "mtls":
+		return false, nil
+	default:
+		return false, fmt.Errorf("frameworks telemetry: unsupported FRAMEWORKS_DECKLOG_TLS_MODE %q", mode)
 	}
-	return s
 }

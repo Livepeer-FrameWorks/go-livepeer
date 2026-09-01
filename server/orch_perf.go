@@ -26,6 +26,18 @@ var (
 	orchPerfMemoTTL   = 10 * time.Second
 )
 
+const (
+	orchPerfQueueSize = 256
+	orchPerfWorkers   = 2
+)
+
+type perfObservation struct {
+	workload, capKey, endpoint string
+	meta                       perfMeta
+	xcodeSpeed, rttSpeed       float64
+	ok                         bool
+}
+
 // Performance and suspension are keyed by the concrete instance ENDPOINT we
 // POSTed to (the resolved Transcoder URL), NOT by a wallet address. A single
 // on-chain service can run many instances behind throwaway signer wallets that
@@ -224,7 +236,33 @@ func recordOrchPerf(sess *BroadcastSession, seg *stream.HLSSegment, uploadDur, t
 	}
 	workload := sess.Params.Workload
 	capKey := common.ProfilesNames(sess.Params.Profiles)
-	go store.recordPerf(workload, capKey, endpoint, meta, xcodeSpeed, rttSpeed, ok)
+	store.enqueuePerf(perfObservation{
+		workload: workload, capKey: capKey, endpoint: endpoint, meta: meta,
+		xcodeSpeed: xcodeSpeed, rttSpeed: rttSpeed, ok: ok,
+	})
+}
+
+func (s *orchHealthStore) enqueuePerf(observation perfObservation) bool {
+	if s == nil || s.rdb == nil {
+		return false
+	}
+	s.perfQueueOnce.Do(func() {
+		s.perfQueue = make(chan perfObservation, orchPerfQueueSize)
+		for range orchPerfWorkers {
+			go func() {
+				for observation := range s.perfQueue {
+					s.recordPerf(observation.workload, observation.capKey, observation.endpoint, observation.meta, observation.xcodeSpeed, observation.rttSpeed, observation.ok)
+				}
+			}()
+		}
+	})
+	select {
+	case s.perfQueue <- observation:
+		return true
+	default:
+		glog.V(4).Info("orch perf: observation queue full; dropping sample")
+		return false
+	}
 }
 
 func subsetScores(src map[string]float64, keys []string) map[string]float64 {

@@ -37,8 +37,10 @@ var (
 // suspenders identical to today's behavior, so single-gateway and self-hosted
 // deployments need no Redis.
 type orchHealthStore struct {
-	rdb    *redis.Client
-	region string
+	rdb           *redis.Client
+	region        string
+	perfQueueOnce sync.Once
+	perfQueue     chan perfObservation
 }
 
 var (
