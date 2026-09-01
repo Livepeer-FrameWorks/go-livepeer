@@ -41,6 +41,10 @@ func (stm *stubTransactionSenderReader) TransactionReceipt(ctx context.Context, 
 	return stm.receipt, stm.err["TransactionReceipt"]
 }
 
+func (stm *stubTransactionSenderReader) SubscribeTransactionReceipts(ctx context.Context, query *ethereum.TransactionReceiptsQuery, ch chan<- []*types.Receipt) (ethereum.Subscription, error) {
+	return nil, stm.err["SubscribeTransactionReceipts"]
+}
+
 func (stm *stubTransactionSenderReader) CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error) {
 	return []byte{}, stm.err["CodeAt"]
 }
