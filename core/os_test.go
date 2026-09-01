@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -74,6 +75,20 @@ func TestDownloadDataAllowLocalhostAllowsLoopback(t *testing.T) {
 	defer server.Close()
 
 	data, err := DownloadDataAllowLocalhost(context.Background(), server.URL)
+	require.NoError(t, err)
+	require.Equal(t, []byte("segment"), data)
+}
+
+func TestDownloadDataAllowsOperatorApprovedLoopback(t *testing.T) {
+	SetAllowedInternalOSPrefixes([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	t.Cleanup(func() { SetAllowedInternalOSPrefixes(nil) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("segment"))
+	}))
+	defer server.Close()
+
+	data, err := DownloadData(context.Background(), server.URL)
 	require.NoError(t, err)
 	require.Equal(t, []byte("segment"), data)
 }

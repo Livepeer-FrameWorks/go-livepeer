@@ -46,6 +46,9 @@ func rejectLocalhostDial(_ context.Context, _, address string, _ syscall.RawConn
 		return fmt.Errorf("invalid resolved download host %q: %w", host, err)
 	}
 	addr = addr.Unmap()
+	if internalOSAddressAllowed(addr) {
+		return nil
+	}
 	if addr.IsLoopback() || addr.IsUnspecified() {
 		return fmt.Errorf("%w: %s", errLocalhostDownload, address)
 	}
