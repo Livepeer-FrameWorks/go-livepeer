@@ -74,8 +74,8 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0.53.0/go.mod h1:jUZ5LYlw40WMd07qxcQJD5M40aUxrfwqQX1g7zxYnrQ=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 h1:Ron4zCA/yk6U7WOBXhTJcDpsUBG9npumK6xw2auFltQ=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0/go.mod h1:cSgYe11MCNYunTnRXrKiR/tHc0eoKjICUuWpNZoVCOo=
-github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901121904-297b5f291dc4 h1:GubACx0ud3tQcAvtrUGgr/oCqLPIUY89GU4Sw0e+dSU=
-github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901121904-297b5f291dc4/go.mod h1:z5ROP1l5OzAKSoqVRLc34MjUdueil6wHSecQYV7llIw=
+github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661 h1:JdEH8Cr+eGcqW9t2ckGWvlw924dPJqguj8Uio36beTc=
+github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661/go.mod h1:z5ROP1l5OzAKSoqVRLc34MjUdueil6wHSecQYV7llIw=
 github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260901122223-f789dac11149 h1:QLn2Zr2l94sGCfBK4ti/UCs55J423XlXMYMA8EzPZNg=
 github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260901122223-f789dac11149/go.mod h1:WMnsiFm6DXsCZ0mPEE9fn8sz1RCH0f+SHzqDzYtU7OE=
 github.com/Masterminds/semver/v3 v3.2.1 h1:RN9w6+7QoMeJVGyfmbcgs28Br8cvmnucEXnY0rYXWg0=

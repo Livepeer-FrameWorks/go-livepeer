@@ -302,4 +302,4 @@ require (
 	lukechampine.com/blake3 v1.2.1 // indirect
 )
 
-replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901121904-297b5f291dc4
+replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661
