@@ -132,6 +132,9 @@ func lpCfg() starter.LivepeerConfig {
 
 	ethPassword := ""
 	network := "devnet"
+	cliTxRoutes := true
+	capacityMode := "static"
+	osAllowInternalCIDRs := "127.0.0.0/8,::1/128"
 	blockPollingInterval := int(e2eBlockPollingInterval / time.Second)
 	pricePerUnit := "1"
 	initializeRound := true
@@ -144,6 +147,15 @@ func lpCfg() starter.LivepeerConfig {
 	cfg.RtmpAddr = &rtmpAddr
 	cfg.EthPassword = &ethPassword
 	cfg.Network = &network
+	// E2E exercises the transaction-capable CLI handlers explicitly. Production
+	// keeps these routes disabled by default.
+	cfg.CliTxRoutes = &cliTxRoutes
+	// These protocol-flow tests are not capacity/load tests. Host utilization on
+	// shared CI runners must not make the orchestrator nondeterministically reject.
+	cfg.CapacityMode = &capacityMode
+	// The test orchestrator and its rendition store intentionally share the
+	// loopback host. Production remains deny-by-default for internal OS URLs.
+	cfg.OSAllowInternalCIDRs = &osAllowInternalCIDRs
 	cfg.BlockPollingInterval = &blockPollingInterval
 	cfg.PricePerUnit = &pricePerUnit
 	cfg.InitializeRound = &initializeRound
