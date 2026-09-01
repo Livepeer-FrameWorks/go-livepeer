@@ -225,6 +225,25 @@ func TestTranscodeResults_ErrorsWhenPixelsHeaderMissing(t *testing.T) {
 	require.Contains(t, w.Body.String(), "Invalid Pixels")
 }
 
+func TestParseRemoteUtilization(t *testing.T) {
+	utilization, err := parseRemoteUtilization("")
+	require.NoError(t, err)
+	require.Nil(t, utilization)
+
+	utilization, err = parseRemoteUtilization("0.75")
+	require.NoError(t, err)
+	require.NotNil(t, utilization)
+	require.Equal(t, 0.75, *utilization)
+
+	for _, invalid := range []string{"NaN", "+Inf", "-0.1", "1.1", "invalid"} {
+		t.Run(invalid, func(t *testing.T) {
+			utilization, err := parseRemoteUtilization(invalid)
+			require.Error(t, err)
+			require.Nil(t, utilization)
+		})
+	}
+}
+
 func TestRemoteTranscoder_FullProfiles(t *testing.T) {
 	assert := assert.New(t)
 	httpc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}

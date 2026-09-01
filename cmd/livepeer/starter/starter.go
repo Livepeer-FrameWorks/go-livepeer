@@ -703,7 +703,6 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 	}
 
 	var transcoderCaps []core.Capability
-	var bootCal *core.BootCalibration
 	if *cfg.Transcoder {
 		core.WorkDir = *cfg.Datadir
 		accel := ffmpeg.Software
@@ -739,7 +738,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			glog.Infof("Transcoding on these %v devices: %v", accelName, devices)
 			// Test transcoding with specified device
 			if *cfg.TestTranscoder {
-				transcoderCaps, bootCal, err = core.TestTranscoderCapabilities(devices, tf)
+				transcoderCaps, err = core.TestTranscoderCapabilities(devices, tf)
 				if err != nil {
 					glog.Exit(err)
 				}
@@ -776,15 +775,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 				core.GetHWMonitorFactory(accel),
 			)
 			n.CapacityMgr.Start()
-			// Seed EMA from boot calibration if available
-			if bootCal != nil {
-				for dev, elapsed := range bootCal.DeviceTiming {
-					// Test segments are ~2s; use the ratio as initial EMA baseline
-					ratio := elapsed.Seconds() / 2.0
-					n.CapacityMgr.SeedBaseline(dev, ratio)
-					glog.Infof("Boot calibration: device %s transcode took %v (ratio=%.3f)", dev, elapsed, ratio)
-				}
-			}
+			defer n.CapacityMgr.Stop()
 			// Wire CapacityManager into LB for utilization-aware GPU selection
 			if lbt, ok := n.Transcoder.(*core.LoadBalancingTranscoder); ok {
 				lbt.SetCapacityManager(n.CapacityMgr)

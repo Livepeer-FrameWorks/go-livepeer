@@ -332,17 +332,8 @@ func testAccelTranscode(device string, tf func(device string) TranscoderSession,
 	return outputProduced, outputValid, elapsed, err
 }
 
-// BootCalibration holds per-device timing from boot-time capability tests,
-// used to seed the CapacityManager's realtime ratio EMA.
-type BootCalibration struct {
-	// DeviceTiming maps device ID to the fastest transcode duration observed during capability testing.
-	DeviceTiming map[string]time.Duration
-}
-
 // Test which capabilities transcoder supports
-func TestTranscoderCapabilities(devices []string, tf func(device string) TranscoderSession) (caps []Capability, calibration *BootCalibration, fatalError error) {
-	calibration = &BootCalibration{DeviceTiming: make(map[string]time.Duration)}
-
+func TestTranscoderCapabilities(devices []string, tf func(device string) TranscoderSession) (caps []Capability, fatalError error) {
 	// disable logging, unless verbosity is set
 	vFlag := flag.Lookup("v").Value.String()
 	detailsMsg := ""
@@ -381,7 +372,7 @@ func TestTranscoderCapabilities(devices []string, tf func(device string) Transco
 		}
 		// check that capability is supported on all devices
 		for _, device := range devices {
-			outputProduced, outputValid, elapsed, err := testAccelTranscode(device, tf, params.SegmentPath, params.OutProfile, 4)
+			outputProduced, outputValid, _, err := testAccelTranscode(device, tf, params.SegmentPath, params.OutProfile, 4)
 			if err != nil {
 				glog.Infof("%s %q is not supported on device %s%s", params.Kind(), params.Name(), device, detailsMsg)
 				// likely means capability is not supported, don't check on other devices
@@ -394,17 +385,13 @@ func TestTranscoderCapabilities(devices []string, tf func(device string) Transco
 				transcodingFailed()
 				return fatalError == nil
 			}
-			// Track fastest successful transcode per device for boot calibration
-			if prev, ok := calibration.DeviceTiming[device]; !ok || elapsed < prev {
-				calibration.DeviceTiming[device] = elapsed
-			}
 			// no error creating 4 renditions - disable 3 renditions test, as restriction is on driver level, not device
 			runRestrictedSessionTest = false
 		}
 		caps = append(caps, params.Cap)
 		return true
 	})
-	return caps, calibration, fatalError
+	return caps, fatalError
 }
 
 func testSoftwareTranscode(tmpdir string, fname string, profile ffmpeg.VideoProfile, renditionCount int) (outputProduced, outputValid bool, err error) {

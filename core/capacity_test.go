@@ -17,6 +17,7 @@ type mockMonitor struct {
 	memAvail    uint64
 	sessions    int
 	maxSessions int
+	stopCalls   int
 }
 
 func (m *mockMonitor) EncoderUtil() float64    { return m.encoderUtil }
@@ -25,7 +26,7 @@ func (m *mockMonitor) MemoryAvailable() uint64 { return m.memAvail }
 func (m *mockMonitor) ActiveSessions() int     { return m.sessions }
 func (m *mockMonitor) MaxHWSessions() int      { return m.maxSessions }
 func (m *mockMonitor) Start() error            { return nil }
-func (m *mockMonitor) Stop()                   {}
+func (m *mockMonitor) Stop()                   { m.stopCalls++ }
 
 func newMockMonitor() *mockMonitor {
 	return &mockMonitor{
@@ -193,19 +194,6 @@ func TestCapacityManager_EMAReactsToChange(t *testing.T) {
 	assert.Greater(t, state.realtimeEMA, 0.4, "EMA should react to spike")
 }
 
-func TestCapacityManager_SeedBaseline(t *testing.T) {
-	cm := NewCapacityManager([]string{"0"}, ffmpeg.Nvidia, 0, 0, nil)
-
-	cm.SeedBaseline("0", 0.25)
-
-	cm.mu.RLock()
-	state := cm.devices["0"]
-	cm.mu.RUnlock()
-
-	assert.Equal(t, 0.25, state.realtimeEMA)
-	assert.Equal(t, 1, state.sampleCount)
-}
-
 func TestCapacityManager_Utilization(t *testing.T) {
 	monitors := map[string]*mockMonitor{
 		"0": newMockMonitor(),
@@ -243,15 +231,6 @@ func TestCapacityManager_IgnoreUnknownDevice(t *testing.T) {
 
 	assert.False(t, exists, "should NOT create state for unknown device")
 	assert.False(t, monExists, "should NOT create monitor for unknown device")
-
-	// SeedBaseline for unknown device — also ignored
-	cm.SeedBaseline("unknown", 0.5)
-
-	cm.mu.RLock()
-	_, exists = cm.devices["unknown"]
-	cm.mu.RUnlock()
-
-	assert.False(t, exists, "SeedBaseline should NOT create state for unknown device")
 
 	// CheckCapacity still works fine with only the known device
 	err := cm.CheckCapacity()
@@ -321,6 +300,36 @@ func TestCapacityManager_CustomThresholds(t *testing.T) {
 	mon.encoderUtil = 0.65
 	err = cm.CheckCapacity()
 	assert.Equal(t, ErrOrchCap, err, "should reject above custom rejectThresh")
+}
+
+func TestCapacityManager_InvalidThresholdsUseDefaults(t *testing.T) {
+	for _, thresholds := range [][2]float64{
+		{math.NaN(), math.NaN()},
+		{math.Inf(1), math.Inf(1)},
+		{-1, 2},
+	} {
+		cm := NewCapacityManager([]string{"0"}, ffmpeg.Nvidia, thresholds[0], thresholds[1], nil)
+		assert.Equal(t, DefaultAcceptThreshold, cm.acceptThresh)
+		assert.Equal(t, DefaultRejectThreshold, cm.rejectThresh)
+	}
+}
+
+func TestCapacityManager_InvalidMonitorUtilizationRejects(t *testing.T) {
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), -0.1, 1.1} {
+		mon := newMockMonitor()
+		mon.encoderUtil = invalid
+		cm := NewCapacityManager([]string{"0"}, ffmpeg.Nvidia, 0, 0, func(string) HWMonitor { return mon })
+		assert.ErrorIs(t, cm.CheckCapacity(), ErrOrchCap)
+		assert.Equal(t, 1.0, cm.Utilization())
+	}
+}
+
+func TestCapacityManager_StopIsIdempotent(t *testing.T) {
+	mon := newMockMonitor()
+	cm := NewCapacityManager([]string{"0"}, ffmpeg.Nvidia, 0, 0, func(string) HWMonitor { return mon })
+	cm.Stop()
+	cm.Stop()
+	assert.Equal(t, 1, mon.stopCalls)
 }
 
 func TestHWMonitorRegistry(t *testing.T) {

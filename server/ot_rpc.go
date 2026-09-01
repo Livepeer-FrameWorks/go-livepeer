@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -369,12 +370,13 @@ func (h *lphttp) TranscodeResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var res core.RemoteTranscoderResult
-	// Parse reported utilization from remote transcoder
-	if utilStr := r.Header.Get("Utilization"); utilStr != "" {
-		if util, err := strconv.ParseFloat(utilStr, 64); err == nil {
-			res.Utilization = &util
-		}
+	utilization, err := parseRemoteUtilization(r.Header.Get("Utilization"))
+	if err != nil {
+		glog.Errorf("Could not parse utilization: %v", err)
+		http.Error(w, "Invalid Utilization", http.StatusBadRequest)
+		return
 	}
+	res.Utilization = utilization
 	if transcodingErrorMimeType == mediaType {
 		w.Write([]byte("OK"))
 		body, err := ioutil.ReadAll(r.Body)
@@ -445,4 +447,15 @@ func (h *lphttp) TranscodeResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write([]byte("OK"))
+}
+
+func parseRemoteUtilization(value string) (*float64, error) {
+	if value == "" {
+		return nil, nil
+	}
+	utilization, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(utilization) || math.IsInf(utilization, 0) || utilization < 0 || utilization > 1 {
+		return nil, fmt.Errorf("utilization must be a finite value between 0 and 1")
+	}
+	return &utilization, nil
 }

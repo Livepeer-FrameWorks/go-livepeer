@@ -40,6 +40,7 @@ type CapacityManager struct {
 	accel        ffmpeg.Acceleration
 	acceptThresh float64 // accept new work below this (default 0.70)
 	rejectThresh float64 // reject new work above this (default 0.80)
+	stopOnce     sync.Once
 }
 
 const (
@@ -54,10 +55,10 @@ const (
 // NewCapacityManager creates a CapacityManager for the given devices and acceleration type.
 // monitorFactory creates an HWMonitor for a given device ID; if nil, StubMonitor is used.
 func NewCapacityManager(devices []string, accel ffmpeg.Acceleration, acceptThresh, rejectThresh float64, monitorFactory func(device string) HWMonitor) *CapacityManager {
-	if acceptThresh <= 0 {
+	if !validUtilization(acceptThresh) || acceptThresh == 0 {
 		acceptThresh = DefaultAcceptThreshold
 	}
-	if rejectThresh <= 0 {
+	if !validUtilization(rejectThresh) || rejectThresh == 0 {
 		rejectThresh = DefaultRejectThreshold
 	}
 	if rejectThresh <= acceptThresh {
@@ -98,11 +99,17 @@ func (cm *CapacityManager) Start() {
 
 // Stop shuts down all hardware monitor polling loops.
 func (cm *CapacityManager) Stop() {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	for _, mon := range cm.monitors {
-		mon.Stop()
-	}
+	cm.stopOnce.Do(func() {
+		cm.mu.RLock()
+		defer cm.mu.RUnlock()
+		for _, mon := range cm.monitors {
+			mon.Stop()
+		}
+	})
+}
+
+func validUtilization(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 1
 }
 
 // CheckCapacity returns nil if any device can accept new work, or ErrOrchCap if all are overloaded.
@@ -124,6 +131,10 @@ func (cm *CapacityManager) CheckCapacity() error {
 		// Signal 1: Hardware counters — "is the hardware overloaded right now?"
 		encUtil := mon.EncoderUtil()
 		decUtil := mon.DecoderUtil()
+		if !validUtilization(encUtil) || !validUtilization(decUtil) {
+			glog.Warningf("CapacityManager: device %s reported invalid utilization encoder=%v decoder=%v", deviceID, encUtil, decUtil)
+			continue
+		}
 		hwUtil := math.Max(encUtil, decUtil)
 
 		// Signal 2: Realtime ratio EMA — "are we keeping up with realtime?"
@@ -171,7 +182,7 @@ func (cm *CapacityManager) CheckCapacity() error {
 // RecordResult updates the realtime ratio EMA for a device after a transcode completes.
 // Unknown deviceIDs are silently ignored to prevent phantom device creation.
 func (cm *CapacityManager) RecordResult(deviceID string, transcodeDuration, segmentDuration time.Duration) {
-	if segmentDuration <= 0 {
+	if segmentDuration <= 0 || transcodeDuration < 0 {
 		return
 	}
 	ratio := transcodeDuration.Seconds() / segmentDuration.Seconds()
@@ -193,21 +204,6 @@ func (cm *CapacityManager) RecordResult(deviceID string, transcodeDuration, segm
 	state.sampleCount++
 }
 
-// SeedBaseline sets an initial realtime ratio for a device from boot calibration.
-// Unknown deviceIDs are silently ignored.
-func (cm *CapacityManager) SeedBaseline(deviceID string, ratio float64) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
-	state, ok := cm.devices[deviceID]
-	if !ok {
-		glog.V(6).Infof("CapacityManager: ignoring SeedBaseline for unknown device %s", deviceID)
-		return
-	}
-	state.realtimeEMA = ratio
-	state.sampleCount = 1
-}
-
 // Utilization returns the utilization of the least-loaded device (0.0-1.0).
 // Useful for metrics and logging.
 func (cm *CapacityManager) Utilization() float64 {
@@ -222,7 +218,11 @@ func (cm *CapacityManager) Utilization() float64 {
 	minUtil := 1.0
 	for deviceID, state := range cm.devices {
 		mon := cm.monitors[deviceID]
-		hwUtil := math.Max(mon.EncoderUtil(), mon.DecoderUtil())
+		encUtil, decUtil := mon.EncoderUtil(), mon.DecoderUtil()
+		if !validUtilization(encUtil) || !validUtilization(decUtil) {
+			continue
+		}
+		hwUtil := math.Max(encUtil, decUtil)
 		worst := math.Max(hwUtil, state.realtimeEMA)
 		if worst < minUtil {
 			minUtil = worst
