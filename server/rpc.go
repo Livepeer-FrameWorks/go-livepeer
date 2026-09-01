@@ -431,7 +431,8 @@ func remoteIPOnly(addr string) string {
 	return addr
 }
 
-// EndTranscodingSession - the broadcaster calls EndTranscodingSession to tear down sessions used for verification only once
+// EndTranscodingSession tears down an orchestrator session when the gateway no
+// longer needs it.
 func EndTranscodingSession(ctx context.Context, sess *BroadcastSession) error {
 	uri, err := url.Parse(sess.Transcoder())
 	if err != nil {

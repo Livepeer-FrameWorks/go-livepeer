@@ -9,7 +9,6 @@ import (
 	"math/big"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,9 +19,7 @@ import (
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/monitor"
-	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/pm"
-	"github.com/livepeer/go-livepeer/verification"
 	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/livepeer-data/pkg/data"
 	"github.com/livepeer/livepeer-data/pkg/event"
@@ -39,7 +36,6 @@ var maxRefreshSessionsThreshold = 8.0
 
 var recordSegmentsMaxTimeout = 1 * time.Minute
 
-var Policy *verification.Policy
 var BroadcastCfg = NewBroadcastConfig()
 var MaxAttempts = 3
 
@@ -597,17 +593,6 @@ func (bsm *BroadcastSessionsManager) suspendAndRemoveOrch(sess *BroadcastSession
 	}
 }
 
-func (bsm *BroadcastSessionsManager) removeSession(session *BroadcastSession) {
-	bsm.sessLock.Lock()
-	defer bsm.sessLock.Unlock()
-
-	if session.OrchestratorScore == common.Score_Untrusted {
-		bsm.untrustedPool.removeSession(session)
-	} else {
-		bsm.trustedPool.removeSession(session)
-	}
-}
-
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
 	bs.lock.Lock()
 	bs.SegsInFlight = append(bs.SegsInFlight,
@@ -634,7 +619,7 @@ func (bs *BroadcastSession) popSegInFlight() (int, SegFlightMetadata) {
 }
 
 // selects number of sessions to use according to current algorithm
-func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*BroadcastSession, verified bool) {
+func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) []*BroadcastSession {
 	bsm.sessLock.Lock()
 	defer bsm.sessLock.Unlock()
 
@@ -644,7 +629,7 @@ func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*
 		sessions = bsm.trustedPool.selectSessions(ctx, 1)
 	}
 
-	return sessions, verified
+	return sessions
 }
 
 func (bsm *BroadcastSessionsManager) cleanup(ctx context.Context) {
@@ -690,7 +675,8 @@ func (bsm *BroadcastSessionsManager) collectResults(submitResultsCh chan *Submit
 	for i := 0; i < submittedCount; i++ {
 		submitResults[i] = <-submitResultsCh
 	}
-	// we're here because we're doing verification
+	// Prefer a successful trusted result, otherwise use the first successful
+	// untrusted result.
 	var trustedResults *SubmitResult
 	var untrustedResults []*SubmitResult
 	var err error
@@ -949,11 +935,6 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 		return urls, nil
 	}
 
-	var sv *verification.SegmentVerifier
-	if Policy != nil {
-		sv = verification.NewSegmentVerifier(Policy)
-	}
-
 	var (
 		startTime = time.Now()
 		attempts  []data.TranscodeAttemptInfo
@@ -965,7 +946,7 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 	for len(attempts) < MaxAttempts {
 		// if transcodeSegment fails, retry; rudimentary
 		var info *data.TranscodeAttemptInfo
-		urls, info, err = transcodeSegment(ctx, cxn, seg, name, sv, segPar)
+		urls, info, err = transcodeSegment(ctx, cxn, seg, name, segPar)
 		attempts = append(attempts, *info)
 		if err == nil {
 			break
@@ -1024,7 +1005,7 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 }
 
 func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSegment, name string,
-	verifier *verification.SegmentVerifier, segPar *core.SegmentParameters) ([]string, *data.TranscodeAttemptInfo, error) {
+	segPar *core.SegmentParameters) ([]string, *data.TranscodeAttemptInfo, error) {
 
 	var urls []string
 	info := &data.TranscodeAttemptInfo{}
@@ -1039,7 +1020,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	}(time.Now())
 
 	nonce := cxn.nonce
-	sessions, verified := cxn.sessManager.selectSessions(ctx)
+	sessions := cxn.sessManager.selectSessions(ctx)
 	// Return early under a few circumstances:
 	// View-only (non-transcoded) streams or no sessions available
 	if len(sessions) == 0 {
@@ -1071,7 +1052,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 		}
 		sess.pushSegInFlight(seg)
 		var res *ReceivedTranscodeResult
-		res, err = SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, verified)
+		res, err = SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, false)
 		if err != nil || res == nil {
 			if isNonRetryableError(err) {
 				cxn.sessManager.completeSession(ctx, sess, false)
@@ -1083,7 +1064,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 			}
 			return nil, info, err
 		}
-		urls, err = downloadResults(ctx, cxn, seg, sess, res, verifier)
+		urls, err = downloadResults(ctx, cxn, seg, sess, res)
 		return urls, info, err
 	} else {
 		resc := make(chan *SubmitResult, len(sessions))
@@ -1115,7 +1096,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 			}
 		}
 
-		urls, err = downloadResults(ctx, cxn, seg, sess, results, verifier)
+		urls, err = downloadResults(ctx, cxn, seg, sess, results)
 		return urls, info, err
 	}
 }
@@ -1170,8 +1151,7 @@ func prepareForTranscoding(ctx context.Context, cxn *rtmpConnection, sess *Broad
 	return res, nil
 }
 
-func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSegment, sess *BroadcastSession, res *ReceivedTranscodeResult,
-	verifier *verification.SegmentVerifier) ([]string, error) {
+func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSegment, sess *BroadcastSession, res *ReceivedTranscodeResult) ([]string, error) {
 
 	nonce := cxn.nonce
 	// download transcoded segments from the transcoder
@@ -1188,14 +1168,13 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 	cpl := cxn.pl
 
 	var dlErr error
-	segData := make([][]byte, len(res.Segments))
 	n := len(res.Segments)
 	segURLs := make([]string, len(res.Segments))
 	segLock := &sync.Mutex{}
 	cond := sync.NewCond(segLock)
 	var recordWG sync.WaitGroup
 
-	dlFunc := func(url string, pixels int64, i int) {
+	dlFunc := func(url string, i int) {
 		defer func() {
 			cond.L.Lock()
 			n--
@@ -1210,10 +1189,9 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 
 		bros := cpl.GetRecordOSSession()
 		var data []byte
-		// Download segment data in the following cases:
-		// - A verification policy is set. The segment data is needed for signature verification and/or pixel count verification
-		// - The segment data needs to be uploaded to the broadcaster's own OS
-		if verifier != nil || bros != nil || bos != nil && !bos.IsOwn(url) {
+		// Download segment data when it needs to be uploaded to the broadcaster's
+		// own object store or recording store.
+		if bros != nil || bos != nil && !bos.IsOwn(url) {
 			d, err := downloadSeg(ctx, url)
 			if err != nil {
 				errFunc(monitor.SegmentTranscodeErrorDownload, url, err)
@@ -1275,14 +1253,8 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 			url = newURL
 		}
 
-		// Store URLs for the verifier. Be aware that the segment is
-		// already within object storage  at this point, whether local or
-		// external. If a client were to ignore the playlist and
-		// preemptively fetch segments, they could be reading tampered
-		// data. Not an issue if the delivery protocol is being obeyed.
 		segLock.Lock()
 		segURLs[i] = url
-		segData[i] = data
 		segLock.Unlock()
 	}
 
@@ -1291,7 +1263,7 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 		recordWG.Add(len(res.Segments))
 	}
 	for i, v := range res.Segments {
-		go dlFunc(v.Url, v.Pixels, i)
+		go dlFunc(v.Url, i)
 	}
 	if cpl.GetRecordOSSession() != nil && len(res.Segments) > 0 {
 		go func() {
@@ -1316,15 +1288,6 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 		monitor.SegmentDownloaded(ctx, nonce, seg.SeqNo, downloadDur)
 	}
 
-	if verifier != nil {
-		// verify potentially can change content of segURLs
-		err := verify(verifier, cxn, sess, seg, res.TranscodeData, segURLs, segData)
-		if err != nil {
-			clog.Errorf(ctx, "Error verifying nonce=%d manifestID=%s seqNo=%d err=%q", nonce, cxn.mid, seg.SeqNo, err)
-			return nil, err
-		}
-	}
-
 	for i, url := range segURLs {
 		err := cpl.InsertHLSSegment(&sess.Params.Profiles[i], seg.SeqNo, url, seg.Duration)
 		if err != nil {
@@ -1343,7 +1306,7 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 		monitor.SegmentFullyTranscoded(ctx, nonce, seg.SeqNo, common.ProfilesNames(sess.Params.Profiles), errCode, sess.OrchestratorInfo)
 	}
 
-	clog.V(common.DEBUG).Infof(ctx, "Successfully validated segment")
+	clog.V(common.DEBUG).Infof(ctx, "Successfully processed segment")
 	return segURLs, nil
 }
 
@@ -1353,75 +1316,6 @@ var sessionErrRegex = common.GenErrRegex(sessionErrStrings)
 
 func shouldStopSession(err error) bool {
 	return sessionErrRegex.MatchString(err.Error())
-}
-
-func verify(verifier *verification.SegmentVerifier, cxn *rtmpConnection,
-	sess *BroadcastSession, source *stream.HLSSegment,
-	res *net.TranscodeData, URIs []string, segData [][]byte) error {
-
-	sess.lock.RLock()
-	OrchestratorInfo := sess.OrchestratorInfo
-	sess.lock.RUnlock()
-	// Cache segment contents in params.Renditions
-	// If we need to retry transcoding because verification fails,
-	// the segments' OS location will be overwritten.
-	// Cache the segments so we can restore them in OS if necessary.
-	params := &verification.Params{
-		ManifestID:   sess.Params.ManifestID,
-		Source:       source,
-		Profiles:     sess.Params.Profiles,
-		Orchestrator: OrchestratorInfo,
-		Results:      res,
-		URIs:         URIs,
-		Renditions:   segData,
-		OS:           cxn.pl.GetOSSession(),
-	}
-
-	// The return value from the verifier, if any, are the *accepted* params.
-	// The accepted params are not necessarily the same as `params` sent here.
-	// The accepted params may be from an earlier iteration if max retries hit.
-	accepted, err := verifier.Verify(params)
-	if verification.IsRetryable(err) {
-		// If retryable, means tampering was detected from this O
-		// Remove the O from the working set for now
-		// Error falls through towards end if necessary
-		cxn.sessManager.removeSession(sess)
-	}
-	if accepted != nil {
-		// The returned set of results has been accepted by the verifier
-
-		// Check if an earlier verification attempt was the one accepted.
-		// If so, reset the local OS if we're using that since it's been
-		// overwritten with this rendition.
-		for i, data := range accepted.Renditions {
-			if accepted != params && !sess.BroadcasterOS.IsExternal() {
-				// Sanity check that we actually have the rendition data?
-				if len(data) <= 0 {
-					return errors.New("MissingLocalData")
-				}
-				// SaveData only takes the /<rendition>/<seqNo> part of the URI
-				// However, it returns /stream/<manifestID>/<rendition>/<seqNo>
-				// The incoming URI is likely to be in the longer format.
-				// Hence, trim the /stream/<manifestID> prefix if it exists.
-				pfx := fmt.Sprintf("/stream/%s/", sess.Params.ManifestID)
-				uri := strings.TrimPrefix(accepted.URIs[i], pfx)
-				_, err := sess.BroadcasterOS.SaveData(context.TODO(), uri, bytes.NewReader(data), nil, 0)
-				if err != nil {
-					return err
-				}
-			} else {
-				// Normally we don't need to reset the URI here, but we do
-				// if an external OS is used and an earlier attempt is accepted
-				// (Recall that each O uploads segments to a different location
-				// if a B-supplied external OS is used)
-				URIs[i] = accepted.URIs[i]
-			}
-		}
-
-		// Ignore any errors from the Verify call; don't need to retry anymore
-		return nil
-	}
-	return err // possibly nil
 }
 
 // Return an updated copy of the given session using the received transcode result

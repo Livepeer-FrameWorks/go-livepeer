@@ -158,12 +158,6 @@ else
   $TMPDIR/livepeer -gateway -depositMultiplier 0 -network rinkeby $ETH_ARGS || res=$?
   [ $res -ne 0 ]
 
-  # Check that local verification is enabled by default in on-chain mode
-  $TMPDIR/livepeer -gateway -transcodingOptions invalid -network rinkeby $ETH_ARGS 2>&1 | grep "Local verification enabled"
-
-  # Check that local verification is disabled via -localVerify in on-chain mode
-  $TMPDIR/livepeer -gateway -transcodingOptions invalid -localVerify=false -network rinkeby $ETH_ARGS 2>&1 | grep -v "Local verification enabled"
-
   ETH_ARGS=$OLD_ETH_ARGS
 fi
 
@@ -206,16 +200,6 @@ run_lp -gateway
 curl -sI http://127.0.0.1:5935/debug/pprof/allocs | grep "200 OK"
 kill $pid
 
-# exit early if verifier URL is not http
-res=0
-$TMPDIR/livepeer -gateway -verifierUrl tcp://host/ || res=$?
-[ $res -ne 0 ]
-
-# exit early if verifier URL is not properly formatted
-res=0
-$TMPDIR/livepeer -gateway -verifierUrl http\\://host/ || res=$?
-[ $res -ne 0 ]
-
 # Check remote signer URL handling
 $TMPDIR/livepeer -gateway -remoteSignerUrl abc:65535 2>&1 | grep -e "Retrieving OrchestratorInfo fields from remote signer: https://abc:65535"
 
@@ -224,17 +208,6 @@ $TMPDIR/livepeer -gateway -remoteSignerUrl http://127.0.0.1:65535 2>&1 | grep -e
 $TMPDIR/livepeer -gateway -remoteSignerUrl "http://[::1" 2>&1 | grep -e "Invalid remote signer URL"
 
 $TMPDIR/livepeer -gateway -remoteSignerUrl abc:def 2>&1 | grep -e 'Adding HTTPS to remote signer URL failed: parse "https://abc:def": invalid port ":def"'
-
-# Check that verifier shared path is required
-$TMPDIR/livepeer -gateway -verifierUrl http://host 2>&1 | grep "Requires a path to the"
-
-# Check OK with verifier shared path
-run_lp -gateway -verifierUrl http://host -verifierPath path
-kill $pid
-
-# Check OK with verifier + external storage
-run_lp -gateway -verifierUrl http://host -objectStore s3+https://ACCESS_KEY_ID:ACCESS_KEY_PASSWORD@s3api.example.com/bucket-name
-kill $pid
 
 # Check that HTTP ingest is disabled when -httpAddr is publicly accessible and there is no auth webhook URL and -httpIngest defaults to false
 run_lp -gateway -httpAddr 0.0.0.0
@@ -299,11 +272,5 @@ $TMPDIR/livepeer -gateway -transcodingOptions $TMPDIR/invalid.json 2>&1 | grep "
 # Check that it fails out on an invalid schema - width / height as strings
 echo '[{"width":"1","height":"2"}]' >$TMPDIR/schema.json
 $TMPDIR/livepeer -gateway -transcodingOptions $TMPDIR/schema.json 2>&1 | grep "cannot unmarshal string into Go struct field JsonProfile.width of type int"
-
-# Check that local verification is disabled by default in off-chain mode
-$TMPDIR/livepeer -gateway -transcodingOptions invalid 2>&1 | grep -v "Local verification enabled"
-
-# Check that local verification is enabled via -localVerify in off-chain mode
-$TMPDIR/livepeer -gateway -transcodingOptions invalid -localVerify=true 2>&1 | grep "Local verification enabled"
 
 rm -rf $TMPDIR

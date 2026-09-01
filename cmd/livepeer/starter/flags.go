@@ -15,9 +15,6 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.HttpAddr = fs.String("httpAddr", *cfg.HttpAddr, "Address to bind for HTTP commands")
 	cfg.ServiceAddr = fs.String("serviceAddr", *cfg.ServiceAddr, "Orchestrator only. Overrides the on-chain serviceURI that gateways can use to contact this node; may be an IP or hostname.")
 	cfg.Nodes = fs.String("nodes", *cfg.Nodes, "Comma-separated list of instance URLs for this orchestrator")
-	cfg.VerifierURL = fs.String("verifierUrl", *cfg.VerifierURL, "URL of the verifier to use")
-	cfg.VerifierPath = fs.String("verifierPath", *cfg.VerifierPath, "Path to verifier shared volume")
-	cfg.LocalVerify = fs.Bool("localVerify", *cfg.LocalVerify, "Set to true to enable local verification i.e. pixel count and signature verification.")
 	cfg.HttpIngest = fs.Bool("httpIngest", *cfg.HttpIngest, "Set to true to enable HTTP ingest")
 
 	// Broadcaster's Selection Algorithm
@@ -145,9 +142,6 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.OSAllowInternalCIDRs = fs.String("osAllowInternalCIDRs", *cfg.OSAllowInternalCIDRs, "comma-separated internal CIDRs explicitly allowed for remote object-store URLs")
 	cfg.TrustedProxyCIDRs = fs.String("trustedProxyCIDRs", *cfg.TrustedProxyCIDRs, "comma-separated proxy CIDRs trusted to overwrite X-Forwarded-For")
 
-	// Fast Verification GS bucket:
-	cfg.FVfailGsBucket = fs.String("FVfailGsbucket", *cfg.FVfailGsBucket, "Google Cloud Storage bucket for storing segments, which failed fast verification")
-	cfg.FVfailGsKey = fs.String("FVfailGskey", *cfg.FVfailGsKey, "Google Cloud Storage private key file name or key in JSON format for accessing FVfailGsBucket")
 	// API
 	cfg.AuthWebhookURL = fs.String("authWebhookUrl", *cfg.AuthWebhookURL, "RTMP authentication webhook URL")
 
@@ -189,9 +183,6 @@ func UpdateNilsForUnsetFlags(cfg LivepeerConfig) LivepeerConfig {
 	}
 	if !isFlagSet["httpIngest"] {
 		res.HttpIngest = nil
-	}
-	if !isFlagSet["localVerify"] {
-		res.LocalVerify = nil
 	}
 	if !isFlagSet["hevcDecoding"] {
 		res.HevcDecoding = nil

@@ -42,7 +42,6 @@ import (
 	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-livepeer/server"
-	"github.com/livepeer/go-livepeer/verification"
 	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/livepeer-data/pkg/event"
 	"github.com/livepeer/lpms/ffmpeg"
@@ -92,10 +91,7 @@ type LivepeerConfig struct {
 	ServiceAddr                *string
 	Nodes                      *string
 	OrchAddr                   *string
-	VerifierURL                *string
 	EthController              *string
-	VerifierPath               *string
-	LocalVerify                *bool
 	HttpIngest                 *bool
 	Orchestrator               *bool
 	Transcoder                 *bool
@@ -173,8 +169,6 @@ type LivepeerConfig struct {
 	Recordstore                *string
 	OSAllowInternalCIDRs       *string
 	TrustedProxyCIDRs          *string
-	FVfailGsBucket             *string
-	FVfailGsKey                *string
 	AuthWebhookURL             *string
 	LiveAIAuthWebhookURL       *string
 	LiveAITrickleHostForRunner *string
@@ -227,8 +221,6 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	defaultServiceAddr := ""
 	defaultNodes := ""
 	defaultOrchAddr := ""
-	defaultVerifierURL := ""
-	defaultVerifierPath := ""
 
 	// Transcoding:
 	defaultOrchestrator := false
@@ -323,19 +315,12 @@ func DefaultLivepeerConfig() LivepeerConfig {
 	// Ingest:
 	defaultHttpIngest := true
 
-	// Verification:
-	defaultLocalVerify := true
-
 	// Storage:
 	defaultDatadir := ""
 	defaultObjectstore := ""
 	defaultRecordstore := ""
 	defaultOSAllowInternalCIDRs := ""
 	defaultTrustedProxyCIDRs := "127.0.0.0/8,::1/128"
-
-	// Fast Verification GS bucket:
-	defaultFVfailGsBucket := ""
-	defaultFVfailGsKey := ""
 
 	// API
 	defaultAuthWebhookURL := ""
@@ -360,16 +345,14 @@ func DefaultLivepeerConfig() LivepeerConfig {
 
 	return LivepeerConfig{
 		// Network & Addresses:
-		Network:      &defaultNetwork,
-		RtmpAddr:     &defaultRtmpAddr,
-		CliAddr:      &defaultCliAddr,
-		CliTxRoutes:  &defaultCliTxRoutes,
-		HttpAddr:     &defaultHttpAddr,
-		ServiceAddr:  &defaultServiceAddr,
-		Nodes:        &defaultNodes,
-		OrchAddr:     &defaultOrchAddr,
-		VerifierURL:  &defaultVerifierURL,
-		VerifierPath: &defaultVerifierPath,
+		Network:     &defaultNetwork,
+		RtmpAddr:    &defaultRtmpAddr,
+		CliAddr:     &defaultCliAddr,
+		CliTxRoutes: &defaultCliTxRoutes,
+		HttpAddr:    &defaultHttpAddr,
+		ServiceAddr: &defaultServiceAddr,
+		Nodes:       &defaultNodes,
+		OrchAddr:    &defaultOrchAddr,
 
 		// Transcoding:
 		Orchestrator:            &defaultOrchestrator,
@@ -464,19 +447,12 @@ func DefaultLivepeerConfig() LivepeerConfig {
 		// Ingest:
 		HttpIngest: &defaultHttpIngest,
 
-		// Verification:
-		LocalVerify: &defaultLocalVerify,
-
 		// Storage:
 		Datadir:              &defaultDatadir,
 		Objectstore:          &defaultObjectstore,
 		Recordstore:          &defaultRecordstore,
 		OSAllowInternalCIDRs: &defaultOSAllowInternalCIDRs,
 		TrustedProxyCIDRs:    &defaultTrustedProxyCIDRs,
-
-		// Fast Verification GS bucket:
-		FVfailGsBucket: &defaultFVfailGsBucket,
-		FVfailGsKey:    &defaultFVfailGsKey,
 
 		// API
 		AuthWebhookURL: &defaultAuthWebhookURL,
@@ -518,7 +494,6 @@ func (cfg LivepeerConfig) PrintConfig(w io.Writer) {
 		"KafkaPassword":              true,
 		"MediaMTXApiPassword":        true,
 		"LiveAIAuthApiKey":           true,
-		"FVfailGsKey":                true,
 		"RemoteSignerHeaders":        true,
 		"RemoteSignerWebhookHeaders": true,
 	}
@@ -665,11 +640,6 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		if err = os.MkdirAll(*cfg.Datadir, 0755); err != nil {
 			glog.Errorf("Error creating datadir: %v", err)
 		}
-	}
-
-	//Set Gs bucket for fast verification fail case
-	if *cfg.FVfailGsBucket != "" && *cfg.FVfailGsKey != "" {
-		drivers.SetCreds(*cfg.FVfailGsBucket, *cfg.FVfailGsKey)
 	}
 
 	//Set up DB
@@ -1882,35 +1852,6 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		if cfg.HttpIngest == nil && !isLocalHTTP && server.AuthWebhookURL == nil {
 			glog.Warning("HTTP ingest is disabled because -httpAddr is publicly accessible. To enable, configure -authWebhookUrl or use the -httpIngest flag")
 			httpIngest = false
-		}
-
-		// Disable local verification when running in off-chain mode
-		// To enable, set -localVerify or -verifierURL
-		localVerify := true
-		if cfg.LocalVerify != nil {
-			localVerify = *cfg.LocalVerify
-		}
-		if cfg.LocalVerify == nil && *cfg.Network == "offchain" {
-			localVerify = false
-		}
-
-		if *cfg.VerifierURL != "" {
-			_, err := validateURL(*cfg.VerifierURL)
-			if err != nil {
-				glog.Exit("Error setting verifier URL ", err)
-			}
-			glog.Info("Using the Epic Labs classifier for verification at ", *cfg.VerifierURL)
-			server.Policy = &verification.Policy{Retries: 2, Verifier: &verification.EpicClassifier{Addr: *cfg.VerifierURL}}
-
-			// Set the verifier path. Remove once [1] is implemented!
-			// [1] https://github.com/livepeer/verification-classifier/issues/64
-			if drivers.NodeStorage == nil && *cfg.VerifierPath == "" {
-				glog.Exit("Requires a path to the verifier shared volume when local storage is in use; use -verifierPath or -objectStore")
-			}
-			verification.VerifierPath = *cfg.VerifierPath
-		} else if localVerify {
-			glog.Info("Local verification enabled")
-			server.Policy = &verification.Policy{Retries: 2}
 		}
 
 		// Set max transcode attempts. <=0 is OK; it just means "don't transcode"
