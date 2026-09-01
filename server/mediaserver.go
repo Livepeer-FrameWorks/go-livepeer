@@ -173,7 +173,6 @@ type authWebhookResponse struct {
 	// files, while here we decode from HTTP
 	Profiles           []ffmpeg.JsonProfile `json:"profiles"`
 	PreviousSessions   []string             `json:"previousSessions"`
-	VerificationFreq   uint                 `json:"verificationFreq"`
 	TimeoutMultiplier  int                  `json:"timeoutMultiplier"`
 	ForceSessionReinit bool                 `json:"forceSessionReinit"`
 	// TenantID is the FrameWorks tenant the stream belongs to. Foghorn's
@@ -323,7 +322,6 @@ func createStreamIDHandler(_ctx context.Context, s *LivepeerServer, ingest *http
 		var os, ros drivers.OSDriver
 		var oss, ross drivers.OSSession
 		profiles := []ffmpeg.VideoProfile{}
-		var VerificationFreq uint
 		var ingestResp *ingestAuthResponse
 		nonce := common.RandomUint64()
 
@@ -403,8 +401,6 @@ func createStreamIDHandler(_ctx context.Context, s *LivepeerServer, ingest *http
 					return nil, errors.New(errMsg)
 				}
 			}
-
-			VerificationFreq = resp.VerificationFreq
 		} else {
 			profiles = BroadcastJobVideoProfiles
 		}
@@ -458,7 +454,6 @@ func createStreamIDHandler(_ctx context.Context, s *LivepeerServer, ingest *http
 			Profiles:           append([]ffmpeg.VideoProfile(nil), profiles...),
 			OS:                 oss,
 			RecordOS:           ross,
-			VerificationFreq:   VerificationFreq,
 			Nonce:              nonce,
 			TenantID:           fwTenantID,
 			FrameworksStreamID: fwStreamID,
@@ -645,27 +640,12 @@ func (s *LivepeerServer) registerConnection(ctx context.Context, rtmpStrm stream
 	s.connectionLock.RLock()
 	defer s.connectionLock.RUnlock()
 	sessionsNumber := len(s.rtmpConnections)
-	fastVerificationEnabled, fastVerificationUsing := countStreamsWithFastVerificationEnabled(s.rtmpConnections)
 
 	if monitor.Enabled {
 		monitor.CurrentSessions(sessionsNumber)
-		monitor.FastVerificationEnabledAndUsingCurrentSessions(fastVerificationEnabled, fastVerificationUsing)
 	}
 
 	return cxn, nil
-}
-
-func countStreamsWithFastVerificationEnabled(rtmpConnections map[core.ManifestID]*rtmpConnection) (int, int) {
-	var enabled, using int
-	for _, cxn := range rtmpConnections {
-		if cxn.params.VerificationFreq > 0 {
-			enabled++
-			if cxn.sessManager != nil && cxn.sessManager.usingVerified() {
-				using++
-			}
-		}
-	}
-	return enabled, using
 }
 
 func removeRTMPStream(ctx context.Context, s *LivepeerServer, extmid core.ManifestID) error {
@@ -692,7 +672,6 @@ func removeRTMPStream(ctx context.Context, s *LivepeerServer, extmid core.Manife
 	if monitor.Enabled {
 		monitor.StreamEnded(ctx, cxn.nonce)
 		monitor.CurrentSessions(len(s.rtmpConnections))
-		monitor.FastVerificationEnabledAndUsingCurrentSessions(countStreamsWithFastVerificationEnabled(s.rtmpConnections))
 	}
 
 	return nil
@@ -894,10 +873,6 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 		mid = intmid
 	}
 	cxn, exists := s.getActiveRtmpConnectionUnsafe(mid)
-	if monitor.Enabled {
-		fastVerificationEnabled, fastVerificationUsing := countStreamsWithFastVerificationEnabled(s.rtmpConnections)
-		monitor.FastVerificationEnabledAndUsingCurrentSessions(fastVerificationEnabled, fastVerificationUsing)
-	}
 	s.connectionLock.RUnlock()
 	ctx = clog.AddManifestID(ctx, string(mid))
 	if exists && cxn != nil {

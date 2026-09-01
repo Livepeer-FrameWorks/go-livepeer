@@ -1801,14 +1801,13 @@ func TestCollectResults(t *testing.T) {
 	untrustedSess1.OrchestratorScore = common.Score_Untrusted
 	untrustedSess2 := StubBroadcastSession("untrustedTranscoder2")
 	untrustedSess2.OrchestratorScore = common.Score_Untrusted
-	untrustedSessVerified := StubBroadcastSession("untrustedTranscoderVerified")
-	untrustedSessVerified.OrchestratorScore = common.Score_Untrusted
-	bsm := bsmWithSessList([]*BroadcastSession{trustedSess, untrustedSess1, untrustedSess2, untrustedSessVerified})
-	bsm.sessionVerified(untrustedSessVerified)
+	untrustedSess3 := StubBroadcastSession("untrustedTranscoder3")
+	untrustedSess3.OrchestratorScore = common.Score_Untrusted
+	bsm := bsmWithSessList([]*BroadcastSession{trustedSess, untrustedSess1, untrustedSess2, untrustedSess3})
 
 	resChan := make(chan *SubmitResult, 4)
 	resChan <- &SubmitResult{Session: untrustedSess1, TranscodeResult: &ReceivedTranscodeResult{}}
-	resChan <- &SubmitResult{Session: untrustedSessVerified, TranscodeResult: &ReceivedTranscodeResult{}}
+	resChan <- &SubmitResult{Session: untrustedSess3, TranscodeResult: &ReceivedTranscodeResult{}}
 	resChan <- &SubmitResult{Session: untrustedSess2, TranscodeResult: &ReceivedTranscodeResult{}}
 	resChan <- &SubmitResult{Session: trustedSess, TranscodeResult: &ReceivedTranscodeResult{}}
 
@@ -1817,53 +1816,7 @@ func TestCollectResults(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(trustedSess, trustedResult.Session)
 	assert.Len(untrustedResults, 3)
-	// the first result should always come from the verified session
-	assert.Equal(untrustedSessVerified, untrustedResults[0].Session)
-}
-
-func TestVerifcationEnabledWhenFreqGreaterThanZero(t *testing.T) {
-	b := BroadcastSessionsManager{}
-	require.False(t, b.isVerificationEnabled())
-
-	b.VerificationFreq = 1
-	require.True(t, b.isVerificationEnabled())
-}
-
-func TestVerifcationDoesntRunWhenNoVerifiedSessionPresent(t *testing.T) {
-	b := BroadcastSessionsManager{
-		VerificationFreq: 1,
-	}
-	require.False(t, b.shouldSkipVerification(nil))
-
-	b.verifiedSession = &BroadcastSession{
-		LatencyScore: 1.23,
-	}
-
-	require.False(t, b.shouldSkipVerification([]*BroadcastSession{}))
-}
-
-func TestVerifcationRunsBasedOnVerificationFrequency(t *testing.T) {
-	verificationFreq := 5
-	b := BroadcastSessionsManager{
-		VerificationFreq: uint(verificationFreq), // Verification should run approximately 1 in 5 times
-	}
-
-	var verifiedSession = &BroadcastSession{
-		LatencyScore: 1.23,
-	}
-
-	b.verifiedSession = verifiedSession
-
-	var shouldSkipCount int
-	numTests := 10000
-	for i := 0; i < numTests; i++ {
-		if b.shouldSkipVerification([]*BroadcastSession{verifiedSession}) {
-			shouldSkipCount++
-		}
-	}
-
-	require.Greater(t, float32(shouldSkipCount), float32(numTests)*(1-2/float32(verificationFreq)))
-	require.Less(t, float32(shouldSkipCount), float32(numTests)*(1-0.5/float32(verificationFreq)))
+	assert.Equal(untrustedSess1, untrustedResults[0].Session)
 }
 
 func TestMaxPrice(t *testing.T) {

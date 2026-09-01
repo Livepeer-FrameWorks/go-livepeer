@@ -524,8 +524,7 @@ func (sp *SessionPool) completeSession(sess *BroadcastSession) {
 }
 
 type BroadcastSessionsManager struct {
-	mid              core.ManifestID
-	VerificationFreq uint
+	mid core.ManifestID
 
 	// Accessing or changing any of the below requires ownership of this mutex
 	sessLock sync.Mutex
@@ -534,22 +533,6 @@ type BroadcastSessionsManager struct {
 
 	trustedPool   *SessionPool
 	untrustedPool *SessionPool
-
-	verifiedSession *BroadcastSession
-}
-
-func (bsm *BroadcastSessionsManager) isVerificationEnabled() bool {
-	return bsm.VerificationFreq > 0
-}
-
-func (bsm *BroadcastSessionsManager) shouldSkipVerification(sessions []*BroadcastSession) bool {
-	if bsm.verifiedSession == nil {
-		return false
-	}
-	if !includesSession(sessions, bsm.verifiedSession) {
-		return false
-	}
-	return common.RandomUintUnder(bsm.VerificationFreq) != 0
 }
 
 func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *core.StreamParameters) *BroadcastSessionsManager {
@@ -592,10 +575,9 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 	trustedSel.perfReader = perfReader
 	untrustedSel.perfReader = perfReader
 	bsm := &BroadcastSessionsManager{
-		mid:              params.ManifestID,
-		VerificationFreq: params.VerificationFreq,
-		trustedPool:      NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, trustedSel),
-		untrustedPool:    NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, untrustedSel),
+		mid:           params.ManifestID,
+		trustedPool:   NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, trustedSel),
+		untrustedPool: NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, untrustedSel),
 	}
 	latencyThreshold := latencyThresholdForWorkload(params)
 	bsm.trustedPool.latencyThreshold = latencyThreshold
@@ -655,33 +637,6 @@ func (bs *BroadcastSession) popSegInFlight() (int, SegFlightMetadata) {
 func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) (bs []*BroadcastSession, verified bool) {
 	bsm.sessLock.Lock()
 	defer bsm.sessLock.Unlock()
-
-	if bsm.isVerificationEnabled() {
-		// Select 1 trusted O and 2 untrusted Os
-		sessions := append(
-			bsm.trustedPool.selectSessions(ctx, 1),
-			bsm.untrustedPool.selectSessions(ctx, 2)...,
-		)
-
-		// Only return the last verified session if:
-		// - It is present in the 3 sessions returned by the selector
-		// - With probability 1 - 1/VerificationFrequency
-		if bsm.shouldSkipVerification(sessions) {
-			clog.V(common.DEBUG).Infof(ctx, "Reusing verified orch=%v", bsm.verifiedSession.OrchestratorInfo.Transcoder)
-			verified = true
-			// Mark remaining unused sessions returned by selector as complete
-			remaining := removeSessionFromList(sessions, bsm.verifiedSession)
-			for _, sess := range remaining {
-				bsm.completeSessionUnsafe(ctx, sess, true)
-			}
-			sessions = []*BroadcastSession{bsm.verifiedSession}
-		} else if bsm.verifiedSession != nil && !includesSession(sessions, bsm.verifiedSession) {
-			bsm.verifiedSession = nil
-		}
-
-		// Return selected sessions
-		return sessions, verified
-	}
 
 	// Default to selecting from untrusted pool
 	sessions := bsm.untrustedPool.selectSessions(ctx, 1)
@@ -743,9 +698,6 @@ func (bsm *BroadcastSessionsManager) collectResults(submitResultsCh chan *Submit
 		if res.Err == nil && res.TranscodeResult != nil {
 			if res.Session.OrchestratorScore == common.Score_Trusted {
 				trustedResults = res
-			} else if res.Session == bsm.verifiedSession {
-				// verified result should always come first and therefore take the priority
-				untrustedResults = append([]*SubmitResult{res}, untrustedResults...)
 			} else {
 				untrustedResults = append(untrustedResults, res)
 			}
@@ -785,18 +737,6 @@ func (bsm *BroadcastSessionsManager) completeSession(ctx context.Context, sess *
 	bsm.sessLock.Lock()
 	defer bsm.sessLock.Unlock()
 	bsm.completeSessionUnsafe(ctx, sess, tearDown)
-}
-
-func (bsm *BroadcastSessionsManager) sessionVerified(sess *BroadcastSession) {
-	bsm.sessLock.Lock()
-	defer bsm.sessLock.Unlock()
-	bsm.verifiedSession = sess
-}
-
-func (bsm *BroadcastSessionsManager) usingVerified() bool {
-	bsm.sessLock.Lock()
-	defer bsm.sessLock.Unlock()
-	return bsm.verifiedSession != nil
 }
 
 func (bsm *BroadcastSessionsManager) hasOrchestratorPool() bool {

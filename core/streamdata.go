@@ -34,7 +34,6 @@ type StreamParameters struct {
 	OS                drivers.OSSession
 	RecordOS          drivers.OSSession
 	Capabilities      *Capabilities
-	VerificationFreq  uint
 	Nonce             uint64
 	Codec             ffmpeg.VideoCodec
 	PixelFormat       ffmpeg.PixelFormat

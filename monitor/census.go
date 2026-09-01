@@ -85,13 +85,6 @@ type ModelAICapacities struct {
 	Orchestrators map[string]AIContainerCapacity // orchURI -> capacity
 }
 
-const (
-	//mpeg7-sign comparison fail of fast verification
-	FVType1Error = 1
-	//video comparison fail of fast verification
-	FVType2Error = 2
-)
-
 // Enabled true if metrics was enabled in command line
 var Enabled bool
 var PerStreamMetrics bool
@@ -126,7 +119,6 @@ type (
 		kOrchestratorURI              tag.Key
 		kOrchestratorAddress          tag.Key
 		kOrchestratorVersion          tag.Key
-		kFVErrorType                  tag.Key
 		kEventType                    tag.Key
 		kPipeline                     tag.Key
 		kModelName                    tag.Key
@@ -198,12 +190,6 @@ type (
 
 		// Metrics for pixel accounting
 		mMilPixelsProcessed *stats.Float64Measure
-
-		// Metrics for fast verification
-		mFastVerificationDone                   *stats.Int64Measure
-		mFastVerificationFailed                 *stats.Int64Measure
-		mFastVerificationEnabledCurrentSessions *stats.Int64Measure
-		mFastVerificationUsingCurrentSessions   *stats.Int64Measure
 
 		// Metrics for scene classification
 		kSegClassName        tag.Key
@@ -312,7 +298,6 @@ func InitCensus(nodeType NodeType, version string) {
 	census.kOrchestratorURI = tag.MustNewKey("orchestrator_uri")
 	census.kOrchestratorAddress = tag.MustNewKey("orchestrator_address")
 	census.kOrchestratorVersion = tag.MustNewKey("orchestrator_version")
-	census.kFVErrorType = tag.MustNewKey("fverror_type")
 	census.kEventType = tag.MustNewKey("event_type")
 	census.kSegClassName = tag.MustNewKey("seg_class_name")
 	census.kModelName = tag.MustNewKey("model_name")
@@ -393,14 +378,6 @@ func InitCensus(nodeType NodeType, version string) {
 
 	// Metrics for pixel accounting
 	census.mMilPixelsProcessed = stats.Float64("mil_pixels_processed", "MilPixelsProcessed", "mil pixels")
-
-	// Metrics for fast verification
-	census.mFastVerificationDone = stats.Int64("fast_verification_done", "FastVerificationDone", "tot")
-	census.mFastVerificationFailed = stats.Int64("fast_verification_failed", "FastVerificationFailed", "tot")
-	census.mFastVerificationEnabledCurrentSessions = stats.Int64("fast_verification_enabled_current_sessions_total",
-		"Number of currently transcoded streams that have fast verification enabled", "tot")
-	census.mFastVerificationUsingCurrentSessions = stats.Int64("fast_verification_using_current_sessions_total",
-		"Number of currently transcoded streams that have fast verification enabled and that are using an untrusted orchestrator", "tot")
 
 	// Metrics for scene classification
 	census.mSegmentClassProb = stats.Float64("segment_class_prob", "SegmentClassProb", "tot")
@@ -950,36 +927,6 @@ func InitCensus(nodeType NodeType, version string) {
 			Aggregation: view.Sum(),
 		},
 
-		// Metrics for fast verification
-		{
-			Name:        "fast_verification_done",
-			Measure:     census.mFastVerificationDone,
-			Description: "Number of fast verifications done",
-			TagKeys:     append([]tag.Key{census.kOrchestratorURI}, baseTagsWithManifestID...),
-			Aggregation: view.Count(),
-		},
-		{
-			Name:        "fast_verification_failed",
-			Measure:     census.mFastVerificationFailed,
-			Description: "Number of fast verifications failed",
-			TagKeys:     append([]tag.Key{census.kOrchestratorURI, census.kFVErrorType}, baseTagsWithManifestID...),
-			Aggregation: view.Count(),
-		},
-		{
-			Name:        "fast_verification_enabled_current_sessions_total",
-			Measure:     census.mFastVerificationEnabledCurrentSessions,
-			Description: "Number of currently transcoded streams that have fast verification enabled",
-			TagKeys:     baseTags,
-			Aggregation: view.LastValue(),
-		},
-		{
-			Name:        "fast_verification_using_current_sessions_total",
-			Measure:     census.mFastVerificationUsingCurrentSessions,
-			Description: "Number of currently transcoded streams that have fast verification enabled and that are using an untrusted orchestrator",
-			TagKeys:     baseTags,
-			Aggregation: view.LastValue(),
-		},
-
 		// Metrics for scene classification
 		{
 			Name:        "segment_scene_class_prob",
@@ -1498,10 +1445,6 @@ func OrchestratorSwapped(ctx context.Context) {
 
 func CurrentSessions(currentSessions int) {
 	stats.Record(census.ctx, census.mCurrentSessions.M(int64(currentSessions)))
-}
-
-func FastVerificationEnabledAndUsingCurrentSessions(enabled, using int) {
-	stats.Record(census.ctx, census.mFastVerificationEnabledCurrentSessions.M(int64(enabled)), census.mFastVerificationUsingCurrentSessions.M(int64(using)))
 }
 
 func TranscodeTry(ctx context.Context, nonce, seqNo uint64) {
@@ -2400,23 +2343,6 @@ func wei2gwei(wei *big.Int) float64 {
 func fracwei2gwei(wei *big.Rat) float64 {
 	floatWei, _ := wei.Float64()
 	return floatWei / gweiConversionFactor
-}
-
-func FastVerificationDone(ctx context.Context, uri string) {
-	if err := stats.RecordWithTags(census.ctx,
-		manifestIDTag(ctx, tag.Insert(census.kOrchestratorURI, uri)),
-		census.mFastVerificationDone.M(1)); err != nil {
-		clog.Errorf(ctx, "Error recording metrics err=%q", err)
-	}
-}
-
-func FastVerificationFailed(ctx context.Context, uri string, errtype int) {
-	serrtype := strconv.Itoa(errtype)
-	if err := stats.RecordWithTags(census.ctx,
-		manifestIDTag(ctx, tag.Insert(census.kOrchestratorURI, uri), tag.Insert(census.kFVErrorType, serrtype)),
-		census.mFastVerificationFailed.M(1)); err != nil {
-		clog.Errorf(ctx, "Error recording metrics err=%q", err)
-	}
 }
 
 // ToPipeline converts capability name into pipeline name
