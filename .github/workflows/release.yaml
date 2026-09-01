@@ -195,6 +195,9 @@ jobs:
         run: |
           eval "$(/opt/homebrew/bin/brew shellenv)"
           brew install coreutils pkgconf nasm cmake meson ninja || true
+          brew_prefix="$(brew --prefix)"
+          echo "${brew_prefix}/bin" >> "$GITHUB_PATH"
+          echo "${brew_prefix}/sbin" >> "$GITHUB_PATH"
 
       - name: Install go modules
         run: go mod download
