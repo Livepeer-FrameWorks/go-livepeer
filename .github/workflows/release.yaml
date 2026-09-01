@@ -75,8 +75,9 @@ jobs:
           echo "GO_BUILD_DIR=lp-builds/" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$HOME/compiled/lib/pkgconfig" >> $GITHUB_ENV
           echo "LP_BUILD_DIR=livepeer-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}" >> $GITHUB_ENV
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          mkdir -p lp-builds/ releases/
+          echo "GOBIN=$RUNNER_TEMP/go-bin" >> $GITHUB_ENV
+          echo "$RUNNER_TEMP/go-bin" >> $GITHUB_PATH
+          mkdir -p "$RUNNER_TEMP/go-bin" lp-builds/ releases/
 
       - name: Set GPU build environment
         if: matrix.target.type == 'gpu'
@@ -179,8 +180,9 @@ jobs:
           echo "GOOS=darwin" >> $GITHUB_ENV
           echo "GO_BUILD_DIR=lp-builds/" >> $GITHUB_ENV
           echo "LP_BUILD_DIR=livepeer-darwin-arm64" >> $GITHUB_ENV
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          mkdir -p lp-builds/ releases/
+          echo "GOBIN=$RUNNER_TEMP/go-bin" >> $GITHUB_ENV
+          echo "$RUNNER_TEMP/go-bin" >> $GITHUB_PATH
+          mkdir -p "$RUNNER_TEMP/go-bin" lp-builds/ releases/
 
       - name: Cache ffmpeg
         id: cache-ffmpeg
@@ -192,7 +194,6 @@ jobs:
       - name: Install dependencies
         run: |
           eval "$(/opt/homebrew/bin/brew shellenv)"
-          echo "$(brew --prefix)/bin" >> $GITHUB_PATH
           brew install coreutils pkgconf nasm cmake meson ninja || true
 
       - name: Install go modules
