@@ -64,23 +64,30 @@ jobs:
           DISPATCH_SHA: ${{ github.event.client_payload.monorepo_sha }}
           INPUT_SHA: ${{ github.event.inputs.monorepo_sha }}
         run: |
+          set -euo pipefail
           if [ -n "$INPUT_SHA" ]; then
-            echo "sha=$INPUT_SHA" >> "$GITHUB_OUTPUT"
+            TARGET_SHA="$INPUT_SHA"
           elif [ -n "$DISPATCH_SHA" ]; then
-            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+            TARGET_SHA="$DISPATCH_SHA"
           else
-            echo "sha=master" >> "$GITHUB_OUTPUT"
+            TARGET_SHA="master"
           fi
+          if [[ "$TARGET_SHA" != "master" && ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::monorepo_sha must be 'master' or a full 40-character hexadecimal commit SHA"
+            exit 1
+          fi
+          printf 'sha=%s\n' "$TARGET_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Drop local-dev replace and pin pseudo-version
         env:
           GOPRIVATE: github.com/Livepeer-FrameWorks/*
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
           # Remove the local-dev replace if present. Idempotent — no-op when
           # the line is already gone.
           go mod edit -dropreplace=github.com/Livepeer-FrameWorks/monorepo/pkg
-          go get github.com/Livepeer-FrameWorks/monorepo/pkg@${{ steps.target.outputs.sha }}
+          go get "github.com/Livepeer-FrameWorks/monorepo/pkg@${TARGET_SHA}"
           go mod tidy
 
       - name: Capture pinned version
