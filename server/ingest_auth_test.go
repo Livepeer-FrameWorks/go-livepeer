@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/livepeer/lpms/ffmpeg"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,13 @@ func setTestIngestHeader(t *testing.T, req *http.Request, token string) {
 	req.Header.Set(LIVERPEER_TRANSCODE_CONFIG_HEADER, string(config))
 }
 
+func closeTestIngestAuthIdleConnections(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() { ingestAuthHTTPClient.CloseIdleConnections() })
+}
+
 func TestAuthenticateIngestStreamForwardsGatewayObservedContext(t *testing.T) {
+	closeTestIngestAuthIdleConnections(t)
 	var got ingestAuthRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))
@@ -57,7 +64,26 @@ func TestAuthenticateIngestStreamForwardsGatewayObservedContext(t *testing.T) {
 	require.Equal(t, "203.0.113.4", got.RemoteIP)
 }
 
+func TestAuthenticateIngestStreamTimesOut(t *testing.T) {
+	originalClient := ingestAuthHTTPClient
+	ingestAuthHTTPClient = &http.Client{Timeout: 25 * time.Millisecond}
+	t.Cleanup(func() { ingestAuthHTTPClient = originalClient })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	authURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	_, err = authenticateIngestStream(authURL, "http://gateway/live/manifest-1/0.ts", &ingestJobConfig{JobToken: "token"}, ingestSource{}, "203.0.113.4")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "Client.Timeout")
+}
+
 func TestAuthenticateIngestStreamFailsClosed(t *testing.T) {
+	closeTestIngestAuthIdleConnections(t)
 	for _, tc := range []struct {
 		name string
 		body string
@@ -98,6 +124,7 @@ func TestHandlePushRejectsForbiddenHeaderBeforeWebhook(t *testing.T) {
 }
 
 func TestHandlePushFailsClosedWithoutTokenOrAuthResponse(t *testing.T) {
+	closeTestIngestAuthIdleConnections(t)
 	var hits atomic.Int32
 	webhook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	defer webhook.Close()
@@ -125,6 +152,7 @@ func TestHandlePushFailsClosedWithoutTokenOrAuthResponse(t *testing.T) {
 }
 
 func TestHandlePushBindsTokenAndSourceIPForConnection(t *testing.T) {
+	closeTestIngestAuthIdleConnections(t)
 	var got ingestAuthRequest
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&got))

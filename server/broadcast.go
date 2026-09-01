@@ -1576,7 +1576,7 @@ func isNonRetryableError(err error) bool {
 			return true
 		}
 	}
-	if errors.Is(err, maxTranscodeAttempts) || errors.Is(err, errSeqPayloadConflict) {
+	if errors.Is(err, maxTranscodeAttempts) || errors.Is(err, errSeqPayloadConflict) || errors.Is(err, errSeqOutsideReplayWindow) {
 		return true
 	}
 	return false

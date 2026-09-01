@@ -96,24 +96,26 @@ type rtmpConnection struct {
 	mu              sync.Mutex
 	mediaFormat     ffmpeg.MediaFormatInfo
 
-	// Idempotency for duplicate/retried segment pushes keyed by (SeqNo, payload
-	// hash). segDedup coalesces concurrent in-flight pushes of the same segment
-	// bytes into a single transcode; segCache returns the rendition URLs of a
-	// recently-completed segment so a retry arriving after completion does not
+	// Idempotency for duplicate/retried segment pushes keyed by (SeqNo, request
+	// fingerprint). segDedup coalesces concurrent in-flight pushes of the same
+	// media and processing controls into a single transcode; segCache returns the
+	// rendition URLs of a recently-completed segment so a retry after completion does not
 	// start a second transcode (which would poison session state). A same-seq
-	// push carrying *different* bytes is a protocol anomaly and is rejected (see
+	// push carrying a different fingerprint is a protocol anomaly and is rejected (see
 	// segSeen / claimSeq), not served a stale result or joined to the wrong
 	// in-flight transcode.
 	segDedup    singleflight.Group
 	segCacheMu  sync.Mutex
 	segCache    map[uint64]cachedSeg
 	segCacheSeq []uint64
-	// segSeen records the first payload hash observed for an in-flight sequence
-	// number so a same-seq push carrying different bytes (a protocol anomaly:
+	// segSeen records the first request fingerprint observed for an in-flight
+	// sequence number so a same-seq push carrying different media or controls (a protocol anomaly:
 	// MistProcLivepeer keyNo is monotonic and never reused) is rejected rather
 	// than transcoded into a conflicting duplicate.
-	segSeen      map[uint64]uint64
-	segSeenOrder []uint64
+	segSeen           map[uint64]segmentFingerprint
+	segSeenOrder      []uint64
+	segReplayFloor    uint64
+	segReplayFloorSet bool
 }
 
 func (s *LivepeerServer) getActiveRtmpConnectionUnsafe(mid core.ManifestID) (*rtmpConnection, bool) {
@@ -1095,9 +1097,9 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	cxn.mu.Unlock()
 
-	// Do the transcoding! Deduplicated by (SeqNo, payload hash) so a duplicate or
-	// retried push of the same bytes joins the in-flight transcode or returns the
-	// cached result, while a same-seq push of different bytes is rejected.
+	// Do the transcoding! Deduplicated by sequence number plus a fingerprint of
+	// the media and processing controls. Exact retries join the in-flight
+	// transcode or return the cached result; conflicting reuse is rejected.
 	urls, err := cxn.processSegmentDeduped(ctx, seg, &segPar)
 	if err != nil {
 		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {

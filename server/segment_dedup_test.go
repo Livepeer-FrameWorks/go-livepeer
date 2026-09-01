@@ -1,16 +1,23 @@
 package server
 
 import (
+	"crypto/sha256"
 	"testing"
+	"time"
 
 	"github.com/livepeer/go-livepeer/core"
+	"github.com/livepeer/lpms/stream"
 	"github.com/stretchr/testify/assert"
 )
+
+func testSegmentFingerprint(label string) segmentFingerprint {
+	return segmentFingerprint(sha256.Sum256([]byte(label)))
+}
 
 func TestSegCache_PutGetEviction(t *testing.T) {
 	assert := assert.New(t)
 	cxn := &rtmpConnection{}
-	const h = uint64(7)
+	h := testSegmentFingerprint("seven")
 
 	// Fill the cache to its bound.
 	for seq := uint64(0); seq < segCacheMax; seq++ {
@@ -32,9 +39,11 @@ func TestSegCache_PutGetEviction(t *testing.T) {
 
 func TestSegCache_UpdateInPlaceNoGrowth(t *testing.T) {
 	cxn := &rtmpConnection{}
-	cxn.putCachedSegURLs(5, 1, []string{"a"})
-	cxn.putCachedSegURLs(5, 2, []string{"b"})
-	urls, ok := cxn.cachedSegURLs(5, 2)
+	h1 := testSegmentFingerprint("one")
+	h2 := testSegmentFingerprint("two")
+	cxn.putCachedSegURLs(5, h1, []string{"a"})
+	cxn.putCachedSegURLs(5, h2, []string{"b"})
+	urls, ok := cxn.cachedSegURLs(5, h2)
 	if !ok || len(urls) != 1 || urls[0] != "b" {
 		t.Fatalf("expected in-place update to b, got %v ok=%v", urls, ok)
 	}
@@ -45,39 +54,80 @@ func TestSegCache_UpdateInPlaceNoGrowth(t *testing.T) {
 
 func TestSegCache_HashMismatchIsCacheMiss(t *testing.T) {
 	cxn := &rtmpConnection{}
-	cxn.putCachedSegURLs(9, 100, []string{"a"})
+	h1 := testSegmentFingerprint("one")
+	h2 := testSegmentFingerprint("two")
+	cxn.putCachedSegURLs(9, h1, []string{"a"})
 	// Same seq, different payload hash → must not return the stale result.
-	if _, ok := cxn.cachedSegURLs(9, 200); ok {
+	if _, ok := cxn.cachedSegURLs(9, h2); ok {
 		t.Fatal("expected cache miss for same seq with different payload hash")
 	}
 	// Same seq, matching hash → hit.
-	if _, ok := cxn.cachedSegURLs(9, 100); !ok {
+	if _, ok := cxn.cachedSegURLs(9, h1); !ok {
 		t.Fatal("expected hit for matching seq and hash")
 	}
 }
 
 func TestClaimSeq_ConflictOnDifferentPayload(t *testing.T) {
 	cxn := &rtmpConnection{}
+	h1 := testSegmentFingerprint("one")
+	h2 := testSegmentFingerprint("two")
 	// First push of seq 3 records its hash, no conflict.
-	if cxn.claimSeq(3, 0xAA) {
+	if err := cxn.claimSeq(3, h1); err != nil {
 		t.Fatal("first claim should not conflict")
 	}
 	// Same seq, same payload (legit retry) → no conflict.
-	if cxn.claimSeq(3, 0xAA) {
+	if err := cxn.claimSeq(3, h1); err != nil {
 		t.Fatal("same-payload retry should not conflict")
 	}
 	// Same seq, different payload (in-flight) → conflict.
-	if !cxn.claimSeq(3, 0xBB) {
+	if err := cxn.claimSeq(3, h2); err != errSeqPayloadConflict {
 		t.Fatal("different-payload same-seq should conflict (in-flight)")
 	}
 	// A completed seq with a different payload also conflicts.
 	cxn2 := &rtmpConnection{}
-	cxn2.putCachedSegURLs(4, 0x11, []string{"u"})
-	if !cxn2.claimSeq(4, 0x22) {
+	cxn2.putCachedSegURLs(4, h1, []string{"u"})
+	if err := cxn2.claimSeq(4, h2); err != errSeqPayloadConflict {
 		t.Fatal("different-payload same-seq should conflict (completed)")
 	}
-	if cxn2.claimSeq(4, 0x11) {
+	if err := cxn2.claimSeq(4, h1); err != nil {
 		t.Fatal("same-payload as completed should not conflict")
+	}
+}
+
+func TestSegmentRequestFingerprint_BindsProcessingControls(t *testing.T) {
+	seg := &stream.HLSSegment{Data: []byte("media"), Name: "42.ts", Duration: 2, SeqNo: 42}
+	base := segmentRequestFingerprint(seg, &core.SegmentParameters{})
+
+	tests := []struct {
+		name   string
+		seg    *stream.HLSSegment
+		params *core.SegmentParameters
+	}{
+		{name: "duration", seg: &stream.HLSSegment{Data: []byte("media"), Name: "42.ts", Duration: 3, SeqNo: 42}, params: &core.SegmentParameters{}},
+		{name: "name", seg: &stream.HLSSegment{Data: []byte("media"), Name: "42.mp4", Duration: 2, SeqNo: 42}, params: &core.SegmentParameters{}},
+		{name: "zero frame", seg: &stream.HLSSegment{Data: []byte("media"), Name: "42.ts", Duration: 2, SeqNo: 42, IsZeroFrame: true}, params: &core.SegmentParameters{}},
+		{name: "clip", seg: seg, params: &core.SegmentParameters{Clip: &core.SegmentClip{From: time.Second, To: 2 * time.Second}}},
+		{name: "reinit", seg: seg, params: &core.SegmentParameters{ForceSessionReinit: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := segmentRequestFingerprint(tc.seg, tc.params); got == base {
+				t.Fatal("processing-control change must produce a distinct fingerprint")
+			}
+		})
+	}
+}
+
+func TestClaimSeq_RejectsReplayOutsideWindow(t *testing.T) {
+	cxn := &rtmpConnection{}
+	for seq := uint64(1); seq <= segCacheMax+1; seq++ {
+		if err := cxn.claimSeq(seq, testSegmentFingerprint(string(rune(seq)))); err != nil {
+			t.Fatalf("claim seq %d: %v", seq, err)
+		}
+	}
+	if err := cxn.claimSeq(1, testSegmentFingerprint("one")); err != errSeqOutsideReplayWindow {
+		t.Fatalf("expected replay-window rejection, got %v", err)
 	}
 }
 

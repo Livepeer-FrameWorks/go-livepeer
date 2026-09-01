@@ -30,6 +30,8 @@ func TestRejectInternalDial(t *testing.T) {
 		{address: "100.64.0.1:9000", blocked: true},
 		{address: "198.18.0.1:9000", blocked: true},
 		{address: "224.0.0.1:9000", blocked: true},
+		{address: "[64:ff9b::127.0.0.1]:9000", blocked: true},
+		{address: "[64:ff9b:1::127.0.0.1]:9000", blocked: true},
 		{address: "8.8.8.8:443", blocked: false},
 		{address: "[2606:4700:4700::1111]:443", blocked: false},
 	} {

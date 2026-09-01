@@ -91,6 +91,10 @@ func IgnoreRoutines() []goleak.Option {
 		"github.com/rjeczalik/notify.(*nonrecursiveTree).internal", "github.com/livepeer/lpms/stream.NewBasicRTMPVideoStream.func1", "github.com/patrickmn/go-cache.(*janitor).Run",
 		"github.com/livepeer/go-livepeer/core.(*LivepeerNode).transcodeFrames.func2", "github.com/ipfs/go-log/writer.(*MirrorWriter).logRoutine",
 		"github.com/livepeer/go-livepeer/core.(*Balances).StartCleanup",
+		// HTTP transports intentionally keep an idle write loop alive between
+		// requests. Tests using goleak target application watchdogs, not the
+		// standard library's bounded connection pool.
+		"net/http.(*persistConn).writeLoop",
 		"internal/synctest.Run",
 		"testing/synctest.testingSynctestTest",
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -17,6 +18,20 @@ import (
 )
 
 const LIVERPEER_TRANSCODE_CONFIG_HEADER = "Livepeer-Transcode-Configuration"
+
+const ingestAuthTimeout = 5 * time.Second
+
+var ingestAuthHTTPClient = &http.Client{
+	Timeout: ingestAuthTimeout,
+	Transport: &http.Transport{
+		Proxy:                 nil,
+		DisableKeepAlives:     true,
+		DialContext:           (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 3 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
 
 type authWebhookRequest struct {
 	URL               string               `json:"url"`
@@ -84,7 +99,12 @@ func authenticateIngestStream(authURL *url.URL, incomingRequestURL string, cfg *
 		return nil, err
 	}
 
-	resp, err := http.Post(authURL.String(), "application/json", bytes.NewBuffer(jsonValue))
+	httpReq, err := http.NewRequest(http.MethodPost, authURL.String(), bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := ingestAuthHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
