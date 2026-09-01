@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/big"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/livepeer/go-livepeer/eth"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Start Geth Docker container helpers
@@ -36,6 +38,17 @@ func setupGeth(t *testing.T, ctx context.Context) *gethContainer {
 	req := testcontainers.ContainerRequest{
 		Image:        "livepeer/geth-with-livepeer-protocol:confluence",
 		ExposedPorts: []string{"8546/tcp", "8545/tcp"},
+		WaitingFor: wait.ForHTTP("/").
+			WithPort("8545/tcp").
+			WithForcedIPv4LocalHost().
+			WithMethod(http.MethodPost).
+			WithHeaders(map[string]string{"Content-Type": "application/json"}).
+			WithBody(strings.NewReader(`{"jsonrpc":"2.0","method":"eth_accounts","params":[],"id":1}`)).
+			WithResponseMatcher(func(body io.Reader) bool {
+				response, err := io.ReadAll(body)
+				return err == nil && bytes.Contains(response, []byte(`"result"`))
+			}).
+			WithStartupTimeout(time.Minute),
 	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -45,6 +58,9 @@ func setupGeth(t *testing.T, ctx context.Context) *gethContainer {
 
 	ip, err := container.Host(ctx)
 	require.NoError(t, err)
+	if ip == "localhost" || ip == "::1" {
+		ip = "127.0.0.1"
+	}
 
 	mappedPort, err := container.MappedPort(ctx, "8545")
 	require.NoError(t, err)
