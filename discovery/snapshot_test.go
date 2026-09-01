@@ -119,31 +119,34 @@ func TestValidateDiscoverySnapshot(t *testing.T) {
 	}
 
 	// Valid (address compared case-insensitively).
-	assert.NoError(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", now))
+	assert.NoError(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", "r", now))
 
 	// Schema mismatch.
 	s := base()
 	s.SchemaVersion = common.DiscoverySnapshotSchemaVersion + 1
-	assert.Error(t, validateDiscoverySnapshot(s, "1", "main", "0xabc", now))
+	assert.Error(t, validateDiscoverySnapshot(s, "1", "main", "0xabc", "r", now))
 
 	// Chain mismatch.
-	assert.Error(t, validateDiscoverySnapshot(base(), "2", "main", "0xabc", now))
+	assert.Error(t, validateDiscoverySnapshot(base(), "2", "main", "0xabc", "r", now))
 
 	// Network mismatch.
-	assert.Error(t, validateDiscoverySnapshot(base(), "1", "test", "0xabc", now))
+	assert.Error(t, validateDiscoverySnapshot(base(), "1", "test", "0xabc", "r", now))
 
 	// Broadcaster mismatch.
-	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xother", now))
+	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xother", "r", now))
+
+	// Region mismatch.
+	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", "other", now))
 
 	// Expired.
-	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", now.Add(discoverySnapshotMaxAge+time.Hour)))
+	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", "r", now.Add(discoverySnapshotMaxAge+time.Hour)))
 
 	// Minor clock skew is accepted; clearly future-dated snapshots are rejected.
-	assert.NoError(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", now.Add(-discoverySnapshotMaxFutureSkew/2)))
-	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", now.Add(-discoverySnapshotMaxFutureSkew-time.Second)))
+	assert.NoError(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", "r", now.Add(-discoverySnapshotMaxFutureSkew/2)))
+	assert.Error(t, validateDiscoverySnapshot(base(), "1", "main", "0xabc", "r", now.Add(-discoverySnapshotMaxFutureSkew-time.Second)))
 
 	// Nil.
-	assert.Error(t, validateDiscoverySnapshot(nil, "1", "main", "0xabc", now))
+	assert.Error(t, validateDiscoverySnapshot(nil, "1", "main", "0xabc", "r", now))
 }
 
 func TestHydrateFromSnapshot(t *testing.T) {
@@ -165,7 +168,7 @@ func TestHydrateFromSnapshot(t *testing.T) {
 	require.NoError(dbh.UpdateNetworkCapabilitiesSnapshot(raw))
 
 	// Replacement-host case: local DB empty -> caps restored AND rows seeded.
-	got := HydrateFromSnapshot(node, "main", broadcaster, nil, time.Now())
+	got := HydrateFromSnapshot(node, "main", broadcaster, "r", nil, time.Now())
 	require.NotNil(got)
 	assert.True(got.CapturedAt.Equal(snap.CapturedAt))
 	assert.Len(node.GetNetworkCapabilities(), 1)
@@ -175,7 +178,7 @@ func TestHydrateFromSnapshot(t *testing.T) {
 
 	// Mismatched identity is ignored (no panic, returns nil).
 	node2 := &core.LivepeerNode{Database: dbh}
-	assert.Nil(HydrateFromSnapshot(node2, "main", "0xWRONG", nil, time.Now()))
+	assert.Nil(HydrateFromSnapshot(node2, "main", "0xWRONG", "r", nil, time.Now()))
 	assert.Empty(node2.GetNetworkCapabilities())
 }
 
@@ -199,7 +202,7 @@ func TestHydrateFromSnapshot_DoesNotOverwriteFresherLocalRows(t *testing.T) {
 	require.NoError(err)
 	require.NoError(dbh.UpdateNetworkCapabilitiesSnapshot(raw))
 
-	require.NotNil(HydrateFromSnapshot(node, "main", broadcaster, nil, time.Now()))
+	require.NotNil(HydrateFromSnapshot(node, "main", broadcaster, "r", nil, time.Now()))
 	// Caps still restored.
 	assert.Len(node.GetNetworkCapabilities(), 1)
 	// But the local serviceURI is preserved, not overwritten by the snapshot.

@@ -60,10 +60,10 @@ func parseDiscoverySnapshot(raw string) (*common.DiscoverySnapshot, error) {
 }
 
 // validateDiscoverySnapshot rejects a snapshot from a different schema version,
-// chain, network, or gateway, or one older than discoverySnapshotMaxAge. This
+// chain, network, gateway, or region, or one older than discoverySnapshotMaxAge. This
 // is what stops a snapshot meant for another network/gateway (e.g. via a shared
 // Redis mirror) from ever being applied.
-func validateDiscoverySnapshot(snap *common.DiscoverySnapshot, chainID, network, broadcasterAddr string, now time.Time) error {
+func validateDiscoverySnapshot(snap *common.DiscoverySnapshot, chainID, network, broadcasterAddr, region string, now time.Time) error {
 	if snap == nil {
 		return fmt.Errorf("no snapshot")
 	}
@@ -78,6 +78,9 @@ func validateDiscoverySnapshot(snap *common.DiscoverySnapshot, chainID, network,
 	}
 	if !strings.EqualFold(snap.BroadcasterAddr, broadcasterAddr) {
 		return fmt.Errorf("snapshot broadcaster mismatch: have %q want %q", snap.BroadcasterAddr, broadcasterAddr)
+	}
+	if snap.Region != region {
+		return fmt.Errorf("snapshot region mismatch: have %q want %q", snap.Region, region)
 	}
 	if age := now.Sub(snap.CapturedAt); age > discoverySnapshotMaxAge {
 		return fmt.Errorf("snapshot too old: captured %s ago", age.Round(time.Second))
@@ -97,7 +100,7 @@ func validateDiscoverySnapshot(snap *common.DiscoverySnapshot, chainID, network,
 // startup never fails on an absent/stale snapshot. Returns the applied snapshot
 // (whose CapturedAt the caller seeds into the pool cache so an early empty
 // refresh doesn't immediately clear the hydrated caps), or nil if none applied.
-func HydrateFromSnapshot(n *core.LivepeerNode, network, broadcasterAddr string, currentRound *big.Int, now time.Time) *common.DiscoverySnapshot {
+func HydrateFromSnapshot(n *core.LivepeerNode, network, broadcasterAddr, region string, currentRound *big.Int, now time.Time) *common.DiscoverySnapshot {
 	if n == nil || n.Database == nil {
 		return nil
 	}
@@ -121,7 +124,7 @@ func HydrateFromSnapshot(n *core.LivepeerNode, network, broadcasterAddr string, 
 	if id, err := db.ChainID(); err == nil && id != nil {
 		chainID = id.String()
 	}
-	if err := validateDiscoverySnapshot(snap, chainID, network, broadcasterAddr, now); err != nil {
+	if err := validateDiscoverySnapshot(snap, chainID, network, broadcasterAddr, region, now); err != nil {
 		glog.Infof("discovery: ignoring persisted snapshot: %v", err)
 		return nil
 	}

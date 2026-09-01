@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -569,6 +570,27 @@ func TestLiveRunnerManagerConstruction(t *testing.T) {
 	t.Cleanup(manager.Stop)
 	node.LiveRunnerManager = manager
 	require.NotNil(t, node.LiveRunnerManager)
+}
+
+func TestCreateSelectionAlgorithmRejectsInvalidNumbers(t *testing.T) {
+	newConfig := func() LivepeerConfig {
+		fs := flag.NewFlagSet("selection-test", flag.ContinueOnError)
+		return NewLivepeerConfig(fs)
+	}
+
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), -0.1, 1.1} {
+		cfg := newConfig()
+		*cfg.SelectPerfWeight = invalid
+		_, err := createSelectionAlgorithm(cfg)
+		require.Error(t, err)
+	}
+
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), 0, -1} {
+		cfg := newConfig()
+		*cfg.SelectPriceExpFactor = invalid
+		_, err := createSelectionAlgorithm(cfg)
+		require.Error(t, err)
+	}
 }
 
 // Helper struct to capture output for testing

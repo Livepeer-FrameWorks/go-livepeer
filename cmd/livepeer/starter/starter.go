@@ -1834,7 +1834,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			var hydratedAt time.Time
 			var hydratedOrchCount int
 			if *cfg.OrchWebhookURL == "" && len(orchURLs) == 0 {
-				if snap := discovery.HydrateFromSnapshot(n, *cfg.Network, bcast.Address().Hex(), timeWatcher.LastInitializedRound(), time.Now()); snap != nil {
+				if snap := discovery.HydrateFromSnapshot(n, *cfg.Network, bcast.Address().Hex(), *cfg.Region, timeWatcher.LastInitializedRound(), time.Now()); snap != nil {
 					hydratedAt = snap.CapturedAt
 					hydratedOrchCount = len(snap.Orchestrators)
 				}
@@ -2666,6 +2666,20 @@ func createSelectionAlgorithm(cfg LivepeerConfig) (common.SelectionAlgorithm, er
 	priceWeight := envFloatOr("FRAMEWORKS_SELECT_PRICE_WEIGHT", *cfg.SelectPriceWeight)
 	randWeight := envFloatOr("FRAMEWORKS_SELECT_RAND_WEIGHT", *cfg.SelectRandWeight)
 	perfWeight := envFloatOr("FRAMEWORKS_SELECT_PERF_WEIGHT", *cfg.SelectPerfWeight)
+	weights := map[string]float64{
+		"stakeWeight": stakeWeight,
+		"priceWeight": priceWeight,
+		"randWeight":  randWeight,
+		"perfWeight":  perfWeight,
+	}
+	for name, weight := range weights {
+		if math.IsNaN(weight) || math.IsInf(weight, 0) || weight < 0 || weight > 1 {
+			return nil, fmt.Errorf("selection algorithm %s must be a finite value between 0 and 1, got %v", name, weight)
+		}
+	}
+	if math.IsNaN(*cfg.SelectPriceExpFactor) || math.IsInf(*cfg.SelectPriceExpFactor, 0) || *cfg.SelectPriceExpFactor <= 0 {
+		return nil, fmt.Errorf("selection algorithm priceExpFactor must be a positive finite value, got %v", *cfg.SelectPriceExpFactor)
+	}
 
 	sumWeight := stakeWeight + priceWeight + randWeight + perfWeight
 	if math.Abs(sumWeight-1.0) > 0.0001 {
