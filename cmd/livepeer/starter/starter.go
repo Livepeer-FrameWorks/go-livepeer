@@ -25,7 +25,6 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/golang/glog"
@@ -37,6 +36,7 @@ import (
 	"github.com/livepeer/go-livepeer/discovery"
 	"github.com/livepeer/go-livepeer/eth"
 	"github.com/livepeer/go-livepeer/eth/blockwatch"
+	"github.com/livepeer/go-livepeer/eth/ethrpc"
 	"github.com/livepeer/go-livepeer/eth/watchers"
 	lpmon "github.com/livepeer/go-livepeer/monitor"
 	"github.com/livepeer/go-livepeer/monitor/frameworks"
@@ -886,7 +886,7 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		}
 
 		//Set up eth client
-		backend, err := ethclient.Dial(*cfg.EthUrl)
+		backend, err := ethrpc.DialEthClient(ctx, *cfg.EthUrl)
 		if err != nil {
 			glog.Errorf("Failed to connect to Ethereum client: %v", err)
 			return

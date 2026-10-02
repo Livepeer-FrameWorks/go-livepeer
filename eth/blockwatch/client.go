@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/livepeer/go-livepeer/eth/ethrpc"
 )
 
 // Client defines the methods needed to satisfy the client expected when
@@ -34,14 +35,11 @@ type RPCClient struct {
 // NewRPCClient returns a new Client for fetching Ethereum blocks using the given
 // ethclient.Client.
 func NewRPCClient(rpcURL string, requestTimeout time.Duration) (*RPCClient, error) {
-	ethClient, err := ethclient.Dial(rpcURL)
+	rpcClient, err := ethrpc.Dial(context.Background(), rpcURL)
 	if err != nil {
 		return nil, err
 	}
-	rpcClient, err := rpc.Dial(rpcURL)
-	if err != nil {
-		return nil, err
-	}
+	ethClient := ethclient.NewClient(rpcClient)
 	return &RPCClient{rpcClient: rpcClient, client: ethClient, requestTimeout: requestTimeout}, nil
 }
 
