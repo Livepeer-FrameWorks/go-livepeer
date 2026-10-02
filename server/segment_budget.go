@@ -140,6 +140,22 @@ func (b segmentBudget) orchCap() time.Duration {
 	return time.Duration(float64(b.total) * singleOrchBudgetShare)
 }
 
+// budgetedMaxAttempts is how many orchestrators a segment with budget b may
+// try: one per segment duration that fits in the budget, counting segments
+// shorter than a second as one second, and never fewer than MaxAttempts. The
+// budget still ends processing first when attempts are slow.
+func budgetedMaxAttempts(b segmentBudget, segDurSec float64) int {
+	segDur := time.Duration(segDurSec * float64(time.Second))
+	if segDur < time.Second {
+		segDur = time.Second
+	}
+	n := int(math.Ceil(float64(b.total) / float64(segDur)))
+	if n < MaxAttempts {
+		return MaxAttempts
+	}
+	return n
+}
+
 // hedgeDelay is how long the gateway waits for the first orchestrator's result
 // before also submitting the segment to a second one: the earlier of
 // hedgeSegDurShare of the segment duration and the orchestrator's estimated

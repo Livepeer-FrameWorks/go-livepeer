@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/lpms/stream"
 	"github.com/stretchr/testify/assert"
 )
@@ -57,6 +59,14 @@ func poolWithSessList(sessList []*BroadcastSession) *sessionPoolLIFO {
 	return newSessionPoolLIFO(pool)
 }
 
+// pushStaleSeg marks sess as carrying a segment that has been in flight too
+// long for selectSessions to reuse it.
+func pushStaleSeg(sess *BroadcastSession) {
+	sess.lock.Lock()
+	sess.SegsInFlight = append(sess.SegsInFlight, SegFlightMetadata{startTime: time.Now().Add(-10 * time.Second), segDur: time.Second})
+	sess.lock.Unlock()
+}
+
 func TestSelectSession(t *testing.T) {
 	pool := stubPool()
 
@@ -72,9 +82,11 @@ func TestSelectSession(t *testing.T) {
 	assert.Equal(expectedSess1, sess)
 	assert.Equal(sess, pool.lastSess[0])
 	assert.Len(pool.sessList(), 1)
+	pushStaleSeg(sess)
 
 	sess = pool.selectSessions(context.TODO(), 1)[0]
 	assert.Equal(expectedSess2, sess)
+	pushStaleSeg(sess)
 	assert.Equal(sess, pool.lastSess[0])
 	assert.Len(pool.sessList(), 0)
 
@@ -102,7 +114,9 @@ func TestSelectSession(t *testing.T) {
 	assert.Len(pool.sessMap, 2)
 	// sanity checks then rebuild in order
 	firstSess := pool.selectSessions(context.TODO(), 1)
+	pushStaleSeg(firstSess[0])
 	expectedSess := pool.selectSessions(context.TODO(), 1)[0]
+	pushStaleSeg(expectedSess)
 	assert.Len(pool.sessList(), 0)
 	assert.Len(pool.sessMap, 2)
 	pool.completeSession(expectedSess)
@@ -349,8 +363,10 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 	assert.Len(pool.sessList(), 1)
 
 	completeSegStub(sess1)
-	assert.Len(pool.lastSess, 1)
-	assert.Len(pool.lastSess[0].SegsInFlight, 0)
+	// An idle session whose latency score misses the threshold leaves the
+	// reuse list for the selector.
+	assert.Empty(pool.lastSess)
+	assert.Len(sess1.SegsInFlight, 0)
 	assert.Len(pool.sessList(), 2)
 
 	// Same as above but to check thread safety, run this under -race
@@ -369,7 +385,8 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 	go func() { completeSegStub(sess0); wg.Done() }()
 	go func() { completeSegStub(sess1); wg.Done() }()
 	assert.True(wgWait(&wg), "Segment completion timed out")
-	assert.Len(pool.lastSess[0].SegsInFlight, 0)
+	assert.Len(sess0.SegsInFlight, 0)
+	assert.Empty(pool.lastSess)
 
 	// send in multiple segments with delay > segDur to trigger O switch
 	sess0 = sendSegStub()
@@ -406,7 +423,7 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 
 	completeSegStub(sess0)
 	completeSegStub(sess1)
-	assert.Len(pool.lastSess[0].SegsInFlight, 0)
+	assert.Len(sess1.SegsInFlight, 0)
 
 	// send in multiple segments with delay > 2*segDur and only a single session available
 	pool.suspend(expectedSess0.OrchestratorInfo.Transcoder)
@@ -523,4 +540,226 @@ func TestSelectSessionMoreThanOne(t *testing.T) {
 	assert.Len(sessions[0].SegsInFlight, 1)
 	completeSegStubs(sessions2)
 	assert.Len(pool.sessList(), 3)
+}
+
+// assertSessionPlacement checks that every session in the pool sits in exactly
+// one of the selector, the reuse list or in flight, so no session is orphaned
+// and none can be handed out twice.
+func assertSessionPlacement(t *testing.T, pool *SessionPool) {
+	t.Helper()
+	inSel := map[*BroadcastSession]int{}
+	switch sel := pool.sel.(type) {
+	case *MinLSSelector:
+		for _, s := range sel.sessions {
+			inSel[s]++
+		}
+		for _, s := range *sel.knownSessions {
+			inSel[s]++
+		}
+	case *LIFOSelector:
+		for _, s := range *sel {
+			inSel[s]++
+		}
+	default:
+		t.Fatalf("unsupported selector %T", pool.sel)
+	}
+	for orch, sess := range pool.sessMap {
+		inLast := 0
+		for _, s := range pool.lastSess {
+			if s == sess {
+				inLast++
+			}
+		}
+		inFlight := len(sess.SegsInFlight) > 0
+		placements := inSel[sess] + inLast
+		if placements == 0 && inFlight {
+			placements = 1
+		}
+		assert.Equal(t, 1, placements, "orch=%s selector=%d reuse=%d inFlight=%v", orch, inSel[sess], inLast, inFlight)
+		if inSel[sess] > 0 {
+			assert.False(t, inFlight, "orch=%s is in the selector with segments in flight", orch)
+		}
+	}
+}
+
+// A hedge that answers a segment before the slower in-flight orchestrator is
+// reused for the next segment, and neither session is lost from the pool.
+func TestSessionPool_HedgeWinnerIsReusedAndNeverOrphaned(t *testing.T) {
+	assert := assert.New(t)
+	ctx := context.Background()
+
+	slow := StubBroadcastSession("https://slow")
+	healthy := StubBroadcastSession("https://healthy")
+	sel := NewMinLSSelector(nil, 1.0, nil, nil, nil)
+	sel.Add([]*BroadcastSession{slow, healthy})
+	pool := NewSessionPool("test", 2, 2, newSuspender(), func() ([]*BroadcastSession, error) { return nil, nil },
+		func(string) {}, sel)
+	pool.sessMap = map[string]*BroadcastSession{slow.Transcoder(): slow, healthy.Transcoder(): healthy}
+	bsm := &BroadcastSessionsManager{
+		trustedPool:   pool,
+		untrustedPool: NewSessionPool("test", 0, 0, newSuspender(), nil, func(string) {}, NewMinLSSelector(nil, 1.0, nil, nil, nil)),
+	}
+	seg := &stream.HLSSegment{Duration: 2.0}
+
+	// Segment 0 goes to the slow orchestrator.
+	sessions := bsm.selectSessions(ctx)
+	assert.Equal([]*BroadcastSession{slow}, sessions)
+	slow.pushSegInFlight(seg)
+	assertSessionPlacement(t, pool)
+
+	// Segment 1 reuses it while segment 0 is in flight for less than segDur.
+	sessions = bsm.selectSessions(ctx)
+	assert.Equal([]*BroadcastSession{slow}, sessions)
+	slow.pushSegInFlight(seg)
+	assertSessionPlacement(t, pool)
+
+	// Segment 0 is hedged to the healthy orchestrator, which answers first.
+	hedge := bsm.selectHedgeSession(ctx, slow)
+	assert.Equal(healthy, hedge)
+	healthy.pushSegInFlight(seg)
+	bsm.releaseSession(slow)
+	bsm.promoteSession(healthy)
+	healthy.LatencyScore = 0.2
+	bsm.completeSession(ctx, healthy, false)
+	assertSessionPlacement(t, pool)
+
+	// Segment 2 prefers the hedge winner over the slower in-flight session.
+	sessions = bsm.selectSessions(ctx)
+	assert.Equal([]*BroadcastSession{healthy}, sessions)
+	healthy.pushSegInFlight(seg)
+	assertSessionPlacement(t, pool)
+	bsm.completeSession(ctx, healthy, false)
+	assertSessionPlacement(t, pool)
+
+	// Segment 1 finishes on the slow orchestrator; it goes back to the
+	// selector instead of displacing the winner.
+	slow.LatencyScore = 0.9
+	bsm.completeSession(ctx, slow, false)
+	assertSessionPlacement(t, pool)
+	assert.Equal(1, pool.sel.Size())
+
+	sessions = bsm.selectSessions(ctx)
+	assert.Equal([]*BroadcastSession{healthy}, sessions)
+	assertSessionPlacement(t, pool)
+}
+
+// A session dropped from the reuse list while idle goes back to the selector.
+func TestSessionPool_DroppedReuseSessionReturnsToSelector(t *testing.T) {
+	assert := assert.New(t)
+	ctx := context.Background()
+
+	a := StubBroadcastSession("https://a")
+	b := StubBroadcastSession("https://b")
+	sel := NewMinLSSelector(nil, 1.0, nil, nil, nil)
+	sel.Add([]*BroadcastSession{a, b})
+	pool := NewSessionPool("test", 2, 2, newSuspender(), func() ([]*BroadcastSession, error) { return nil, nil },
+		func(string) {}, sel)
+	pool.sessMap = map[string]*BroadcastSession{a.Transcoder(): a, b.Transcoder(): b}
+
+	sessions := pool.selectSessions(ctx, 1)
+	assert.Equal([]*BroadcastSession{a}, sessions)
+	// A hedge on b answers and is promoted next to a.
+	hedge := pool.selectIdle(ctx, a)
+	assert.Equal(b, hedge)
+	pool.promote(b)
+	b.LatencyScore = 0.2
+	a.LatencyScore = 0.2
+	// Both are idle and kept for reuse.
+	pool.completeSession(b)
+	assertSessionPlacement(t, pool)
+
+	// a is still in flight; the next selection reuses b and drops a from the
+	// reuse list, which must hand a back to the selector once it finishes.
+	a.pushSegInFlight(&stream.HLSSegment{Duration: 2.0})
+	sessions = pool.selectSessions(ctx, 1)
+	assert.Len(sessions, 1)
+	assertSessionPlacement(t, pool)
+	pool.completeSession(a)
+	assertSessionPlacement(t, pool)
+	assert.Len(pool.sessMap, 2)
+}
+
+// suspensionTestPool builds a pool whose discovery always returns a fresh
+// session for every orchestrator in orchs, suspended or not, as discovery does
+// when it has fewer healthy orchestrators than it was asked for.
+func suspensionTestPool(sus orchSuspender, orchs ...string) *SessionPool {
+	create := func() ([]*BroadcastSession, error) {
+		var out []*BroadcastSession
+		for _, o := range orchs {
+			out = append(out, StubBroadcastSession(o))
+		}
+		return out, nil
+	}
+	return NewSessionPool("test", len(orchs), len(orchs), sus, create, func(string) {}, NewMinLSSelector(nil, 1.0, nil, nil, nil))
+}
+
+// An orchestrator suspended after a failed segment stays out of the stream's
+// pool for the suspension window even though discovery keeps returning it.
+func TestSessionPool_SuspendedOrchStaysOutWithoutRedis(t *testing.T) {
+	assert := assert.New(t)
+	ctx := context.Background()
+	store := &orchHealthStore{}
+	pool := suspensionTestPool(store.scoped(core.WorkloadVOD, "p"), "https://bad", "https://good")
+	bsm := &BroadcastSessionsManager{trustedPool: pool, untrustedPool: suspensionTestPool(store.scoped(core.WorkloadVOD, "p"))}
+
+	pool.refreshSessions(ctx)
+	assert.Len(pool.sessMap, 2)
+	bsm.suspendAndRemoveOrch(ctx, pool.sessMap["https://bad"], errors.New("Invalid argument"))
+
+	for i := 0; i < 5; i++ {
+		pool.refreshSessions(ctx)
+	}
+	assert.NotContains(pool.sessMap, "https://bad")
+	assert.Contains(pool.sessMap, "https://good")
+	assert.Greater(pool.sus.Suspended("https://bad"), 0)
+	assertSessionPlacement(t, pool)
+}
+
+// With every orchestrator suspended and nothing left in the pool, discovery's
+// suspended orchestrators are used rather than none.
+func TestSessionPool_SuspendedOrchAdmittedWhenNothingElse(t *testing.T) {
+	assert := assert.New(t)
+	ctx := context.Background()
+	store := &orchHealthStore{}
+	pool := suspensionTestPool(store.scoped(core.WorkloadVOD, "p"), "https://bad")
+	bsm := &BroadcastSessionsManager{trustedPool: pool, untrustedPool: suspensionTestPool(store.scoped(core.WorkloadVOD, "p"))}
+
+	pool.refreshSessions(ctx)
+	bsm.suspendAndRemoveOrch(ctx, pool.sessMap["https://bad"], errors.New("Invalid argument"))
+	assert.Empty(pool.sessMap)
+	pool.refreshSessions(ctx)
+	assert.Contains(pool.sessMap, "https://bad")
+}
+
+// The in-memory suspension ends with its window.
+func TestSessionPool_InMemorySuspensionExpires(t *testing.T) {
+	assert := assert.New(t)
+	old := orchHealthVODTTL
+	orchHealthVODTTL = 50 * time.Millisecond
+	defer func() { orchHealthVODTTL = old }()
+
+	sus := (&orchHealthStore{}).scoped(core.WorkloadVOD, "p")
+	sus.suspend("https://bad", 1)
+	sus.signalRefresh()
+	sus.signalRefresh()
+	assert.Equal(1, sus.Suspended("https://bad"))
+	time.Sleep(60 * time.Millisecond)
+	assert.Zero(sus.Suspended("https://bad"))
+}
+
+// With Redis, an orchestrator one stream suspended is kept out of another
+// stream's pool.
+func TestSessionPool_RedisSuspensionKeepsOrchOutOfOtherStreams(t *testing.T) {
+	assert := assert.New(t)
+	ctx := context.Background()
+	store := newTestPerfStore(t)
+	poolA := suspensionTestPool(store.scoped(core.WorkloadVOD, "p"), "https://bad", "https://good")
+	bsmA := &BroadcastSessionsManager{trustedPool: poolA, untrustedPool: suspensionTestPool(store.scoped(core.WorkloadVOD, "p"))}
+	poolA.refreshSessions(ctx)
+	bsmA.suspendAndRemoveOrch(ctx, poolA.sessMap["https://bad"], errors.New("Invalid argument"))
+
+	poolB := suspensionTestPool(store.scoped(core.WorkloadVOD, "p"), "https://bad", "https://good")
+	poolB.refreshSessions(ctx)
+	assert.NotContains(poolB.sessMap, "https://bad")
+	assert.Contains(poolB.sessMap, "https://good")
 }

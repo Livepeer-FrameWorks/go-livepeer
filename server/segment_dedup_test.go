@@ -147,8 +147,12 @@ func TestLatencyThresholdForWorkload(t *testing.T) {
 func TestOrchHealthStore_ScopedFallbackWhenNoRedis(t *testing.T) {
 	store := &orchHealthStore{region: "eu"}
 	sus := store.scoped(core.WorkloadVOD, "240p,360p")
-	if _, ok := sus.(*suspender); !ok {
-		t.Fatalf("expected in-memory *suspender fallback, got %T", sus)
+	ws, ok := sus.(*windowSuspender)
+	if !ok {
+		t.Fatalf("expected in-memory *windowSuspender fallback, got %T", sus)
+	}
+	if ws.window != orchHealthVODTTL {
+		t.Fatalf("expected the vod suspension window, got %s", ws.window)
 	}
 }
 

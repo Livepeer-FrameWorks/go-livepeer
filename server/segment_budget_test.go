@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,7 +117,7 @@ func TestNewSessionManager_OffchainRemoveSessionWithoutSender(t *testing.T) {
 	bsm := NewSessionManager(context.TODO(), n, &core.StreamParameters{ManifestID: mid, OS: drivers.NewMemoryDriver(nil).NewSession(string(mid))})
 	sess := StubBroadcastSession("https://orch")
 	bsm.trustedPool.sessMap[sess.Transcoder()] = sess
-	assert.NotPanics(t, func() { bsm.suspendAndRemoveOrch(sess) })
+	assert.NotPanics(t, func() { bsm.suspendAndRemoveOrch(context.Background(), sess, errors.New("test")) })
 }
 
 // A panic while processing a segment fails that segment instead of the

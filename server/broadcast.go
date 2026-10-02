@@ -159,7 +159,10 @@ type SessionPool struct {
 	// Accessing or changing any of the below requires ownership of this mutex
 	lock sync.Mutex
 
-	sel      BroadcastSessionsSelector
+	sel BroadcastSessionsSelector
+	// inSel holds the sessions this pool handed to sel and sel has not
+	// returned yet, so a session is never added to the selector twice.
+	inSel    map[*BroadcastSession]bool
 	lastSess []*BroadcastSession
 	sessMap  map[string]*BroadcastSession
 	numOrchs int // how many orchs to request at once
@@ -210,10 +213,31 @@ func NewSessionPool(mid core.ManifestID, poolSize, numOrchs int, sus orchSuspend
 		poolSize:       poolSize,
 		sessMap:        make(map[string]*BroadcastSession),
 		sel:            sel,
+		inSel:          make(map[*BroadcastSession]bool),
 		createSessions: createSession,
 		cleanupSession: cleanupSession,
 		sus:            sus,
 	}
+}
+
+// toSelector hands sess to the selector unless the selector already holds
+// it. The caller holds sp.lock.
+func (sp *SessionPool) toSelector(sess *BroadcastSession) {
+	if sp.inSel[sess] {
+		return
+	}
+	sp.inSel[sess] = true
+	sp.sel.Complete(sess)
+}
+
+// fromSelector takes the next session from the selector. The caller holds
+// sp.lock.
+func (sp *SessionPool) fromSelector(ctx context.Context) *BroadcastSession {
+	sess := sp.sel.Select(ctx)
+	if sess != nil {
+		delete(sp.inSel, sess)
+	}
+	return sess
 }
 
 func (sp *SessionPool) suspend(orch string) {
@@ -251,11 +275,11 @@ func (sp *SessionPool) selectIdle(ctx context.Context, exclude *BroadcastSession
 	var skipped []*BroadcastSession
 	defer func() {
 		for _, s := range skipped {
-			sp.sel.Complete(s)
+			sp.toSelector(s)
 		}
 	}()
 	for sp.sel.Size() > 0 {
-		sess := sp.sel.Select(ctx)
+		sess := sp.fromSelector(ctx)
 		if sess == nil {
 			return nil
 		}
@@ -272,7 +296,8 @@ func (sp *SessionPool) selectIdle(ctx context.Context, exclude *BroadcastSession
 }
 
 // release drops one in-flight segment from a session whose submission was
-// cancelled and returns the session to the selector once it is idle. A
+// cancelled and takes it off the reuse list. The session returns to the
+// selector now when idle, or when its last in-flight segment completes. A
 // session that is no longer in the pool is ignored.
 func (sp *SessionPool) release(sess *BroadcastSession) {
 	sp.lock.Lock()
@@ -280,22 +305,41 @@ func (sp *SessionPool) release(sess *BroadcastSession) {
 	if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
 		return
 	}
+	sp.lastSess = removeSessionFromList(sp.lastSess, sess)
 	if remaining, _ := sess.popSegInFlight(); remaining > 0 {
 		return
 	}
-	sp.lastSess = removeSessionFromList(sp.lastSess, sess)
-	sp.sel.Complete(sess)
+	sp.toSelector(sess)
 }
 
-// promote adds a session to the reuse list consulted by selectSessions.
+// promote puts a session first on the reuse list consulted by
+// selectSessions, so a hedge that answered before the orchestrator it hedged
+// is preferred for the next segment.
 func (sp *SessionPool) promote(sess *BroadcastSession) {
 	sp.lock.Lock()
 	defer sp.lock.Unlock()
 	if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
 		return
 	}
-	if !includesSession(sp.lastSess, sess) {
-		sp.lastSess = append(sp.lastSess, sess)
+	sp.lastSess = append([]*BroadcastSession{sess}, removeSessionFromList(sp.lastSess, sess)...)
+}
+
+// returnDropped hands a session that left the reuse list back to the
+// selector when it is idle; a session with segments in flight returns when
+// the last of them completes. The caller holds sp.lock.
+//
+// Every session in sessMap is in exactly one of the selector, the reuse list,
+// or in flight. A session in none of them would stay in sessMap, where
+// refreshSessions never re-adds it, and so would never be used again.
+func (sp *SessionPool) returnDropped(sess *BroadcastSession) {
+	if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
+		return
+	}
+	sess.lock.RLock()
+	inFlight := len(sess.SegsInFlight)
+	sess.lock.RUnlock()
+	if inFlight == 0 {
+		sp.toSelector(sess)
 	}
 }
 
@@ -343,6 +387,15 @@ func (sp *SessionPool) refreshSessions(ctx context.Context) {
 		return
 	}
 
+	// Discovery returns suspended orchestrators when it has too few healthy
+	// ones. They join the pool only when it would otherwise hold no session.
+	suspended := make(map[*BroadcastSession]bool)
+	for _, sess := range newBroadcastSessions {
+		if sp.sus.Suspended(sess.Transcoder()) > 0 {
+			suspended[sess] = true
+		}
+	}
+
 	uniqueSessions := make([]*BroadcastSession, 0, len(newBroadcastSessions))
 	sp.lock.Lock()
 	defer sp.lock.Unlock()
@@ -352,12 +405,31 @@ func (sp *SessionPool) refreshSessions(ctx context.Context) {
 		return
 	}
 
+	var fresh, held []*BroadcastSession
 	for _, sess := range newBroadcastSessions {
-		if _, ok := sp.sessMap[sess.OrchestratorInfo.Transcoder]; ok {
+		if _, ok := sp.sessMap[sess.Transcoder()]; ok {
 			continue
 		}
+		if suspended[sess] {
+			held = append(held, sess)
+		} else {
+			fresh = append(fresh, sess)
+		}
+	}
+	if len(fresh) == 0 && len(sp.sessMap) == 0 {
+		for _, sess := range held {
+			clog.Infof(ctx, "Using suspended orch=%s: no other orchestrator is available", sess.Transcoder())
+		}
+		fresh, held = held, nil
+	}
+	for _, sess := range held {
+		clog.V(common.DEBUG).Infof(ctx, "Not adding suspended orch=%s to the session pool", sess.Transcoder())
+		sp.cleanupSession(sess.PMSessionID)
+	}
+	for _, sess := range fresh {
 		uniqueSessions = append(uniqueSessions, sess)
-		sp.sessMap[sess.OrchestratorInfo.Transcoder] = sess
+		sp.sessMap[sess.Transcoder()] = sess
+		sp.inSel[sess] = true
 	}
 
 	sp.sel.Add(uniqueSessions)
@@ -488,7 +560,7 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 		sess = selectSession(ctx, sp.lastSess, selectedSessions, 1, sp.latencyScoreThreshold())
 		if sess == nil {
 			// Or try a new session from the available ones
-			sess = sp.sel.Select(ctx)
+			sess = sp.fromSelector(ctx)
 		} else {
 			gotFromLast = true
 		}
@@ -547,21 +619,23 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 			}
 		}
 	}
-	if len(selectedSessions) == 0 {
-		// No session found, return nil
-		sp.lastSess = nil
-	} else {
-		for _, ls := range sp.lastSess {
-			if !includesSession(selectedSessions, ls) {
-				clog.V(common.DEBUG).Infof(ctx, "Swapping from orch=%v to orch=%+v for manifestID=%s", ls.Transcoder(),
-					getOrchs(selectedSessions), sp.mid)
-				clog.PublicInfof(ctx, "Swapping from orch=%v to orch=%+v for manifestID=%s", ls.Transcoder(),
-					getOrchs(selectedSessions), sp.mid)
-				if monitor.Enabled {
-					monitor.OrchestratorSwapped(ctx)
-				}
+	for _, ls := range sp.lastSess {
+		if includesSession(selectedSessions, ls) {
+			continue
+		}
+		if len(selectedSessions) > 0 {
+			clog.V(common.DEBUG).Infof(ctx, "Swapping from orch=%v to orch=%+v for manifestID=%s", ls.Transcoder(),
+				getOrchs(selectedSessions), sp.mid)
+			clog.PublicInfof(ctx, "Swapping from orch=%v to orch=%+v for manifestID=%s", ls.Transcoder(),
+				getOrchs(selectedSessions), sp.mid)
+			if monitor.Enabled {
+				monitor.OrchestratorSwapped(ctx)
 			}
 		}
+		sp.returnDropped(ls)
+	}
+	sp.lastSess = nil
+	if len(selectedSessions) > 0 {
 		sp.lastSess = append([]*BroadcastSession{}, selectedSessions...)
 	}
 	return selectedSessions
@@ -581,6 +655,7 @@ func (sp *SessionPool) cleanup() {
 	sp.finished = true
 	sp.lastSess = nil
 	sp.sel.Clear()
+	sp.inSel = make(map[*BroadcastSession]bool)
 	sp.sessMap = make(map[string]*BroadcastSession) // prevent segfaults
 }
 
@@ -604,13 +679,15 @@ func (sp *SessionPool) completeSession(sess *BroadcastSession) {
 			return
 		}
 
-		// If the latency score meets the selector threshold, we skip giving the session back to the selector
-		// because we consider it for re-use in selectSession()
-		if sess.LatencyScore > 0 && sess.LatencyScore <= sp.latencyScoreThreshold() {
+		// A session on the reuse list whose latency score meets the threshold
+		// stays there for selectSession(); any other session goes back to the
+		// selector.
+		if sess.LatencyScore > 0 && sess.LatencyScore <= sp.latencyScoreThreshold() && includesSession(sp.lastSess, sess) {
 			return
 		}
 
-		sp.sel.Complete(sess)
+		sp.lastSess = removeSessionFromList(sp.lastSess, sess)
+		sp.toSelector(sess)
 	}
 }
 
@@ -688,7 +765,10 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 	return bsm
 }
 
-func (bsm *BroadcastSessionsManager) suspendAndRemoveOrch(sess *BroadcastSession) {
+// suspendAndRemoveOrch suspends sess's orchestrator for the stream's
+// suspension window and removes the session from its pool. reason is logged.
+func (bsm *BroadcastSessionsManager) suspendAndRemoveOrch(ctx context.Context, sess *BroadcastSession, reason error) {
+	clog.Warningf(ctx, "Suspending orch=%s reason=%q", sess.Transcoder(), reason)
 	if sess.OrchestratorScore == common.Score_Untrusted {
 		bsm.untrustedPool.suspend(sess.OrchestratorInfo.GetTranscoder())
 		bsm.untrustedPool.removeSession(sess)
@@ -803,9 +883,8 @@ func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *
 	if strikes < slowStrikeLimit {
 		return
 	}
-	clog.Warningf(ctx, "Suspending orch=%s: %d consecutive round trips longer than the segment duration roundTrip=%s segDur=%s",
-		sess.Transcoder(), strikes, roundTrip, segDur)
-	bsm.suspendAndRemoveOrch(sess)
+	bsm.suspendAndRemoveOrch(ctx, sess, fmt.Errorf("%d consecutive round trips longer than the segment duration roundTrip=%s segDur=%s",
+		strikes, roundTrip, segDur))
 }
 
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
@@ -1106,10 +1185,14 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 	if cxn.params != nil && len(cxn.params.Profiles) == 0 {
 		return []string{}, nil
 	}
-	_, budgeted := segmentBudgetFromContext(ctx)
+	budget, budgeted := segmentBudgetFromContext(ctx)
+	maxAttempts := MaxAttempts
+	if budgeted {
+		maxAttempts = budgetedMaxAttempts(budget, seg.Duration)
+	}
 	badInput := badInputTracker{}
 	badInputReached := false
-	for len(attempts) < MaxAttempts {
+	for len(attempts) < maxAttempts {
 		// Each attempt runs on a different orchestrator: a failing one is
 		// suspended and removed before the next selection.
 		var info *data.TranscodeAttemptInfo
@@ -1183,7 +1266,7 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 			}
 		}()
 	}
-	if len(attempts) == MaxAttempts && err != nil && !badInputReached && !errors.Is(err, errSegmentBudgetExhausted) {
+	if len(attempts) == maxAttempts && err != nil && !badInputReached && !errors.Is(err, errSegmentBudgetExhausted) {
 		err = fmt.Errorf("%w: %w", maxTranscodeAttempts, err)
 		if monitor.Enabled {
 			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorMaxAttempts, nonce, seg.SeqNo, err, true)
@@ -1356,7 +1439,7 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 				lastErr = err
 				continue
 			}
-			bsm.suspendAndRemoveOrch(r.Session)
+			bsm.suspendAndRemoveOrch(ctx, r.Session, err)
 			lastErr = &orchError{orch: r.Session.Transcoder(), err: err}
 		case <-hedgeC:
 			hedgeC = nil
@@ -1418,7 +1501,7 @@ func prepareForTranscoding(ctx context.Context, cxn *rtmpConnection, sess *Broad
 			if monitor.Enabled {
 				monitor.SegmentUploadFailed(ctx, cxn.nonce, seg.SeqNo, monitor.SegmentUploadErrorOS, err, false, "")
 			}
-			cxn.sessManager.suspendAndRemoveOrch(sess)
+			cxn.sessManager.suspendAndRemoveOrch(ctx, sess, err)
 			return nil, err
 		}
 		segCopy := *seg
@@ -1428,7 +1511,7 @@ func prepareForTranscoding(ctx context.Context, cxn *rtmpConnection, sess *Broad
 
 	if err := refreshSessionIfNeeded(ctx, sess, false); err != nil {
 		clog.Errorf(ctx, "Error refreshing session manifestID=%s orch=%v err=%q", cxn.mid, sess.Transcoder(), err)
-		cxn.sessManager.suspendAndRemoveOrch(sess)
+		cxn.sessManager.suspendAndRemoveOrch(ctx, sess, err)
 		return nil, err
 	}
 
@@ -1482,7 +1565,7 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 				segLock.Lock()
 				dlErr = err
 				segLock.Unlock()
-				cxn.sessManager.suspendAndRemoveOrch(sess)
+				cxn.sessManager.suspendAndRemoveOrch(ctx, sess, err)
 				return
 			}
 

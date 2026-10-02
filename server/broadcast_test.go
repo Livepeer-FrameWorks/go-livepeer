@@ -1783,3 +1783,49 @@ func TestGetCapabilitiesMaxPrice(t *testing.T) {
 	capabilitiesWithDefault := &StubCapabilityComparator{NetCaps: netCapsWithDefault}
 	assert.Equal(t, big.NewRat(3, 1), cfg.GetCapabilitiesMaxPrice(capabilitiesWithDefault))
 }
+
+// A vod segment with a budget keeps trying other orchestrators after
+// MaxAttempts failures while the budget lasts.
+func TestProcessSegment_BudgetedVODRetriesPastMaxAttempts(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var failCalls, goodCalls atomic.Int32
+	fail := func(w http.ResponseWriter, r *http.Request) {
+		failCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	var sessList []*BroadcastSession
+	good := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &goodCalls)))
+	sessList = append(sessList, good)
+	for i := 0; i < MaxAttempts+1; i++ {
+		sessList = append(sessList, StubBroadcastSession(stubTestTranscoder(ctx, fail)))
+	}
+	for _, s := range sessList {
+		s.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	}
+	// LIFOSelector hands out the failing orchestrators first.
+	bsm := bsmWithSessListExt(sessList, nil, true)
+	cxn := budgetTestConnection(bsm)
+	cxn.params.Workload = core.WorkloadVOD
+
+	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, time.Now())
+	pctx, pcancel := context.WithDeadline(ctx, budget.deadline())
+	defer pcancel()
+	urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	assert.NoError(err)
+	assert.Len(urls, 1)
+	assert.EqualValues(MaxAttempts+1, failCalls.Load())
+	assert.EqualValues(1, goodCalls.Load())
+}
+
+func TestBudgetedMaxAttempts(t *testing.T) {
+	assert := assert.New(t)
+	vod := segmentBudget{total: vodDefaultBudget}
+	assert.Equal(15, budgetedMaxAttempts(vod, 2.0))
+	assert.Equal(30, budgetedMaxAttempts(vod, 0.2), "segments shorter than a second count as one second")
+	live := segmentBudget{total: 3 * time.Second}
+	assert.Equal(MaxAttempts, budgetedMaxAttempts(live, 2.0), "never fewer than MaxAttempts")
+}

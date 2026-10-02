@@ -43,9 +43,9 @@ var (
 
 // orchHealthStore is the process-wide durable orchestrator health backend. When
 // Redis is configured it shares suspension state across the regional gateway
-// pool and survives gateway restarts; otherwise scoped() hands back in-memory
-// suspenders identical to today's behavior, so single-gateway and self-hosted
-// deployments need no Redis.
+// pool and survives gateway restarts; otherwise scoped() hands back per-stream
+// in-memory suspenders with the same suspension windows, so single-gateway and
+// self-hosted deployments need no Redis.
 type orchHealthStore struct {
 	rdb           *redis.Client
 	region        string
@@ -128,11 +128,12 @@ func newOrchHealthRedisFromEnv() (*redis.Client, error) {
 	return redis.NewClient(opt), nil
 }
 
-// scoped returns a suspender bound to a workload and capability key. The
-// in-memory fallback ignores the scope, matching today's per-stream behavior.
+// scoped returns a suspender bound to a workload and capability key. Without
+// Redis it is a per-stream in-memory suspender with the workload's suspension
+// window.
 func (s *orchHealthStore) scoped(workload, capKey string) orchSuspender {
 	if s == nil || s.rdb == nil {
-		return newSuspender()
+		return newWindowSuspender(suspensionTTL(workload))
 	}
 	if workload == "" {
 		workload = core.WorkloadLive
