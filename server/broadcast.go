@@ -224,6 +224,15 @@ func (sp *SessionPool) suspend(orch string) {
 }
 
 func (sp *SessionPool) refreshSessions(ctx context.Context) {
+	// A pool sized from an empty orchestrator class (for example the trusted
+	// pool when discovery marks every on-chain orchestrator untrusted) has
+	// nothing to discover; querying it only produces a "no orchestrators" log.
+	sp.lock.Lock()
+	empty := sp.poolSize <= 0 || sp.numOrchs <= 0
+	sp.lock.Unlock()
+	if empty {
+		return
+	}
 	started := time.Now()
 	clog.V(common.DEBUG).Infof(ctx, "Starting session refresh")
 	defer func() {

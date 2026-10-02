@@ -306,6 +306,53 @@ func TestNewSessionManager(t *testing.T) {
 	assert.True(sd.Size() > max, "pool should be greater than max numOrchs")
 }
 
+func TestNewSessionManager_EmptyTrustedPoolSkipsDiscovery(t *testing.T) {
+	assert := assert.New(t)
+	n, _ := core.NewLivepeerNode(nil, "", nil)
+	sd := &scoredStubDiscovery{}
+	for i := 0; i < 3; i++ {
+		sd.infos = append(sd.infos, &net.OrchestratorInfo{Transcoder: fmt.Sprintf("https://o%d", i), PriceInfo: &net.PriceInfo{}})
+	}
+	n.OrchestratorPool = sd
+	mid := core.RandomManifestID()
+	params := &core.StreamParameters{ManifestID: mid, OS: drivers.NewMemoryDriver(nil).NewSession(string(mid))}
+
+	bsm := NewSessionManager(context.TODO(), n, params)
+	assert.Equal(0, bsm.trustedPool.poolSize)
+	assert.Equal(3, bsm.untrustedPool.poolSize)
+	sd.mu.Lock()
+	defer sd.mu.Unlock()
+	for _, pred := range sd.queried {
+		assert.False(pred(common.Score_Trusted), "trusted pool queried discovery although it is empty")
+	}
+	assert.NotEmpty(sd.queried, "untrusted pool must still be refreshed")
+}
+
+// scoredStubDiscovery reports every orchestrator as untrusted and records the
+// score predicates GetOrchestrators was asked for.
+type scoredStubDiscovery struct {
+	stubDiscovery
+	mu      sync.Mutex
+	queried []common.ScorePred
+}
+
+func (d *scoredStubDiscovery) SizeWith(pred common.ScorePred) int {
+	if pred(common.Score_Untrusted) {
+		return len(d.infos)
+	}
+	return 0
+}
+
+func (d *scoredStubDiscovery) GetOrchestrators(ctx context.Context, num int, sus common.Suspender, caps common.CapabilityComparator, pred common.ScorePred) (common.OrchestratorDescriptors, error) {
+	d.mu.Lock()
+	d.queried = append(d.queried, pred)
+	d.mu.Unlock()
+	if !pred(common.Score_Untrusted) {
+		return nil, nil
+	}
+	return d.stubDiscovery.GetOrchestrators(ctx, num, sus, caps, pred)
+}
+
 func wgWait(wg *sync.WaitGroup) bool {
 	c := make(chan struct{})
 	go func() { defer close(c); wg.Wait() }()
