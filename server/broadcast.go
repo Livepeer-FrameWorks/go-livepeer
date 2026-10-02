@@ -711,6 +711,39 @@ func (bsm *BroadcastSessionsManager) unsuspendOrch(orch string) {
 	}
 }
 
+// sessionWaitInterval is the pause between discovery refreshes while a
+// segment waits for its first orchestrator session.
+var sessionWaitInterval = 250 * time.Millisecond
+
+// waitForSessions refreshes discovery and retries selection until a session
+// is available or ctx ends. A refresh already in flight is waited out by
+// polling selection.
+func (bsm *BroadcastSessionsManager) waitForSessions(ctx context.Context) []*BroadcastSession {
+	waitStart := time.Now()
+	for {
+		refreshed := make(chan struct{})
+		go func() {
+			defer close(refreshed)
+			bsm.trustedPool.refreshSessions(ctx)
+			bsm.untrustedPool.refreshSessions(ctx)
+		}()
+		select {
+		case <-refreshed:
+		case <-ctx.Done():
+			return nil
+		}
+		if sessions := bsm.selectSessions(ctx); len(sessions) > 0 {
+			clog.Infof(ctx, "Orchestrator session available after waiting %s", time.Since(waitStart))
+			return sessions
+		}
+		select {
+		case <-time.After(sessionWaitInterval):
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 // selectHedgeSession returns a session other than exclude that has no
 // segments in flight, or nil when none is available.
 func (bsm *BroadcastSessionsManager) selectHedgeSession(ctx context.Context, exclude *BroadcastSession) *BroadcastSession {
@@ -1173,6 +1206,12 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 
 	nonce := cxn.nonce
 	sessions := cxn.sessManager.selectSessions(ctx)
+	if _, budgeted := segmentBudgetFromContext(ctx); budgeted && len(sessions) == 0 && cxn.sessManager.hasOrchestratorPool() {
+		// Discovery can come back empty while orchestrators start up or are
+		// briefly unreachable; the segment budget, not the first empty pool,
+		// decides when the gateway gives up.
+		sessions = cxn.sessManager.waitForSessions(ctx)
+	}
 	// Return early under a few circumstances:
 	// View-only (non-transcoded) streams or no sessions available
 	if len(sessions) == 0 {

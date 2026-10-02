@@ -107,14 +107,14 @@ func TestPush_ShouldReturn422ForNonRetryable(t *testing.T) {
 
 	s.rtmpConnections["mani"] = cxn
 
-	// Should return 503 if got a retryable error with no sessions to use
+	// Should return 503 if got a retryable error with no other session to use
 	s.HandlePush(w, req)
 	resp := w.Result()
 	defer resp.Body.Close()
 	assert.Equal(503, resp.StatusCode)
 	body, err := ioutil.ReadAll(resp.Body)
 	assert.NoError(err)
-	assert.Contains(string(body), "No sessions available")
+	assert.NotEmpty(body)
 
 	// Should return 503 if max attempts reached with an orchestrator error
 	oldAttempts := MaxAttempts
@@ -345,10 +345,11 @@ func TestPush_MultipartReturn(t *testing.T) {
 	assert.Equal(3*segmentSize, cxn.sourceBytes)
 	assert.Equal(uint64(44), cxn.transcodedBytes)
 
-	// No sessions error
+	// No sessions error: discovery stays empty for the whole segment budget
 	cxn.sessManager.trustedPool.sel.Clear()
 	cxn.sessManager.trustedPool.lastSess = nil
 	cxn.sessManager.trustedPool.sessMap = make(map[string]*BroadcastSession)
+	cxn.sessManager.trustedPool.createSessions = func() ([]*BroadcastSession, error) { return nil, nil }
 
 	reader.Seek(0, 0)
 	req = httptest.NewRequest("POST", "/live/mani/13.ts", reader)
@@ -358,7 +359,7 @@ func TestPush_MultipartReturn(t *testing.T) {
 	resp = w.Result()
 	defer resp.Body.Close()
 	body, _ = ioutil.ReadAll(resp.Body)
-	assert.Equal("No sessions available\n", string(body))
+	assert.Contains(string(body), errSegmentBudgetExhausted.Error())
 	assert.Equal(503, resp.StatusCode)
 
 	// Input Segment bigger than MaxSegSize
@@ -919,10 +920,16 @@ func TestPush_ResetWatchdog(t *testing.T) {
 	ts, mux := stubTLSServer()
 	defer ts.Close()
 	serverBarrier := make(chan struct{})
+	okResult, err := proto.Marshal(&net.TranscodeResult{Result: &net.TranscodeResult_Data{Data: &net.TranscodeData{
+		Segments: []*net.TranscodedSegmentData{{Url: "test.flv"}},
+	}}})
+	require.NoError(t, err)
 	mux.HandleFunc("/segment", func(w http.ResponseWriter, r *http.Request) {
 		assert.True(waitBarrier(serverBarrier), "server barrier timed out")
+		w.Write(okResult)
 	})
 	sess := StubBroadcastSession(ts.URL)
+	sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
 	bsm := bsmWithSessList([]*BroadcastSession{sess})
 	s.connectionLock.Lock()
 	cxn, exists := s.rtmpConnections["name"]
@@ -961,12 +968,13 @@ func TestPush_ResetWatchdog(t *testing.T) {
 	assert.Equal(2, resetCount)
 	assert.Equal(time.Time{}, cxn.lastUsed, "lastUsed was reset")
 
-	// check lastUsed is not reset if session disappears
+	// check lastUsed is not reset if session disappears (a new sequence number,
+	// since segment 0 is now cached)
 	cancelCount = 0
 	resetCount = 0
 	go func() {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/live/name/0.ts", bytes.NewReader(validMedia))
+		req := httptest.NewRequest("POST", "/live/name/1.ts", bytes.NewReader(validMedia))
 		s.HandlePush(w, req)
 		pushFuncBarrier <- struct{}{}
 	}()

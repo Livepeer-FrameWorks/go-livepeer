@@ -51,6 +51,61 @@ func TestHedgeDelay(t *testing.T) {
 	assert.Equal(minHedgeDelay, hedgeDelay(seg, 10*time.Millisecond, true))
 }
 
+// A new stream whose first discovery came back empty waits for discovery
+// within the segment budget instead of failing the segment at once.
+func TestProcessSegment_WaitsForDiscoveryWithinBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	o := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &calls)))
+	o.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+
+	var discoveries atomic.Int32
+	create := func() ([]*BroadcastSession, error) {
+		// Orchestrators are not ready for the first two discovery rounds.
+		if discoveries.Add(1) <= 2 {
+			return nil, nil
+		}
+		return []*BroadcastSession{o}, nil
+	}
+	pool := NewSessionPool("test", 1, 1, newSuspender(), create, func(string) {}, &LIFOSelector{})
+	bsm := &BroadcastSessionsManager{
+		trustedPool:   pool,
+		untrustedPool: NewSessionPool("test", 0, 0, newSuspender(), create, func(string) {}, &LIFOSelector{}),
+	}
+	pool.refreshSessions(ctx) // the empty refresh NewSessionManager does at stream start
+	cxn := budgetTestConnection(bsm)
+
+	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, time.Now())
+	pctx, pcancel := context.WithDeadline(ctx, budget.deadline())
+	defer pcancel()
+	urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	require.NoError(t, err)
+	assert.Len(t, urls, 1)
+	assert.EqualValues(t, 1, calls.Load())
+}
+
+// Without any orchestrator the wait ends with the budget, not before it.
+func TestProcessSegment_NoOrchestratorWaitsOutBudget(t *testing.T) {
+	create := func() ([]*BroadcastSession, error) { return nil, nil }
+	pool := NewSessionPool("test", 1, 1, newSuspender(), create, func(string) {}, &LIFOSelector{})
+	bsm := &BroadcastSessionsManager{
+		trustedPool:   pool,
+		untrustedPool: NewSessionPool("test", 0, 0, newSuspender(), create, func(string) {}, &LIFOSelector{}),
+	}
+	cxn := budgetTestConnection(bsm)
+	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 0.5}
+	start := time.Now()
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, start)
+	pctx, pcancel := context.WithDeadline(context.Background(), budget.deadline())
+	defer pcancel()
+	_, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	assert.ErrorIs(t, err, errNoOrchs)
+	assert.Equal(t, 503, pushErrorStatus(err))
+	assert.GreaterOrEqual(t, time.Since(start), budget.total-50*time.Millisecond)
+}
+
 // A re-POST of a segment joins the transcode started by an earlier request even
 // after that request was abandoned, and gets the result.
 func TestProcessSegmentDeduped_SurvivesLeaderCancel(t *testing.T) {
