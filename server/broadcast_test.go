@@ -871,7 +871,8 @@ func TestProcessSegment_MaxAttempts(t *testing.T) {
 	assert.Equal(1, transcodeCalls, "Segment submission calls did not match")
 	assert.Len(bsm.trustedPool.sessMap, 1)
 
-	// Context canceled. Execute once and not retry
+	// Context canceled. Nothing is submitted, nothing is retried, and the
+	// orchestrator is not blamed for the caller's cancellation.
 	MaxAttempts = 10
 	transcodeCalls = 0
 	ctx, cancel := context.WithCancel(context.Background())
@@ -879,11 +880,13 @@ func TestProcessSegment_MaxAttempts(t *testing.T) {
 	_, err = processSegment(ctx, cxn, seg, nil)
 	assert.NotNil(err)
 	assert.Contains("context canceled", err.Error())
-	assert.Equal(1, transcodeCalls, "Segment submission calls did not match")
-	assert.Len(bsm.trustedPool.sessMap, 0)
+	assert.Equal(0, transcodeCalls, "Segment submission calls did not match")
+	assert.Len(bsm.trustedPool.sessMap, 1)
 
 	// The session list is empty. Surface that as a real error so callers can
 	// stop immediately instead of treating an empty output as success.
+	bsm = bsmWithSessListExt(nil, nil, true)
+	cxn.sessManager = bsm
 	transcodeCalls = 0
 	_, err = processSegment(context.Background(), cxn, seg, nil)
 	assert.ErrorIs(err, errNoOrchs)
@@ -1473,31 +1476,185 @@ func stubTestTranscoder(ctx context.Context, handler http.HandlerFunc) string {
 	return ts.URL
 }
 
-func TestCollectResults(t *testing.T) {
+// orchResultHandler answers /segment with a successful transcode after delay,
+// or with a transcode error when errMsg is set.
+func orchResultHandler(t *testing.T, delay time.Duration, errMsg string, calls *atomic.Int32) http.HandlerFunc {
+	var tr *net.TranscodeResult
+	if errMsg != "" {
+		tr = &net.TranscodeResult{Result: &net.TranscodeResult_Error{Error: errMsg}}
+	} else {
+		tr = &net.TranscodeResult{Result: &net.TranscodeResult_Data{Data: &net.TranscodeData{
+			Segments: []*net.TranscodedSegmentData{{Url: "test.flv", Pixels: 100}},
+		}}}
+	}
+	buf, err := proto.Marshal(tr)
+	require.NoError(t, err)
+	return func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(buf)
+	}
+}
+
+func budgetTestConnection(bsm *BroadcastSessionsManager) *rtmpConnection {
+	return &rtmpConnection{
+		mid:         core.ManifestID("budget"),
+		nonce:       7,
+		pl:          &stubPlaylistManager{manifestID: core.ManifestID("budget"), os: &stubOSSession{}},
+		profile:     &ffmpeg.P144p30fps16x9,
+		params:      &core.StreamParameters{ManifestID: "budget", Profiles: []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}},
+		sessManager: bsm,
+	}
+}
+
+func TestProcessSegment_OrchScopedNonRetryableErrorRetriesElsewhere(t *testing.T) {
 	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	trustedSess := StubBroadcastSession("trustedTranscoder")
-	trustedSess.OrchestratorScore = common.Score_Trusted
-	untrustedSess1 := StubBroadcastSession("untrustedTranscoder1")
-	untrustedSess1.OrchestratorScore = common.Score_Untrusted
-	untrustedSess2 := StubBroadcastSession("untrustedTranscoder2")
-	untrustedSess2.OrchestratorScore = common.Score_Untrusted
-	untrustedSess3 := StubBroadcastSession("untrustedTranscoder3")
-	untrustedSess3.OrchestratorScore = common.Score_Untrusted
-	bsm := bsmWithSessList([]*BroadcastSession{trustedSess, untrustedSess1, untrustedSess2, untrustedSess3})
+	var badCalls, goodCalls atomic.Int32
+	bad := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "Invalid argument", &badCalls)))
+	good := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &goodCalls)))
+	bad.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	good.Params.Profiles = bad.Params.Profiles
+	// LIFOSelector pops the last added session first.
+	bsm := bsmWithSessListExt([]*BroadcastSession{good, bad}, nil, true)
+	cxn := budgetTestConnection(bsm)
 
-	resChan := make(chan *SubmitResult, 4)
-	resChan <- &SubmitResult{Session: untrustedSess1, TranscodeResult: &ReceivedTranscodeResult{}}
-	resChan <- &SubmitResult{Session: untrustedSess3, TranscodeResult: &ReceivedTranscodeResult{}}
-	resChan <- &SubmitResult{Session: untrustedSess2, TranscodeResult: &ReceivedTranscodeResult{}}
-	resChan <- &SubmitResult{Session: trustedSess, TranscodeResult: &ReceivedTranscodeResult{}}
+	urls, err := processSegment(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}, nil)
+	assert.NoError(err)
+	assert.Len(urls, 1)
+	assert.EqualValues(1, badCalls.Load())
+	assert.EqualValues(1, goodCalls.Load())
+	assert.NotContains(bsm.trustedPool.sessMap, bad.Transcoder(), "failing orchestrator must be removed")
+	assert.Greater(bsm.trustedPool.sus.Suspended(bad.Transcoder()), 0, "failing orchestrator must be suspended")
+}
 
-	trustedResult, untrustedResults, err := bsm.collectResults(resChan, 4)
+func TestProcessSegment_SameNonRetryableErrorFromTwoOrchsIsBadInput(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	o1 := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "Invalid argument", &calls)))
+	o2 := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "Invalid argument", &calls)))
+	o3 := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &calls)))
+	for _, s := range []*BroadcastSession{o1, o2, o3} {
+		s.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	}
+	bsm := bsmWithSessListExt([]*BroadcastSession{o3, o2, o1}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	_, err := processSegment(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}, nil)
+	assert.ErrorIs(err, errBadInput)
+	assert.Equal(http.StatusUnprocessableEntity, pushErrorStatus(err))
+	assert.EqualValues(2, calls.Load(), "third orchestrator must not be tried")
+	// The orchestrators were right about the input: no lasting suspension.
+	assert.Zero(bsm.trustedPool.sus.Suspended(o1.Transcoder()))
+	assert.Zero(bsm.trustedPool.sus.Suspended(o2.Transcoder()))
+}
+
+func TestProcessSegment_SingleOrchNonRetryableErrorIsNotBadInput(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldAttempts := MaxAttempts
+	defer func() { MaxAttempts = oldAttempts }()
+	MaxAttempts = 1
+
+	var calls atomic.Int32
+	o1 := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "Invalid argument", &calls)))
+	o1.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	bsm := bsmWithSessListExt([]*BroadcastSession{o1}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	_, err := processSegment(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}, nil)
+	assert.Error(err)
+	assert.NotErrorIs(err, errBadInput)
+	assert.Equal(http.StatusServiceUnavailable, pushErrorStatus(err))
+}
+
+func TestProcessSegment_HedgesSlowOrchestrator(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var slowCalls, fastCalls atomic.Int32
+	slow := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 5*time.Second, "", &slowCalls)))
+	fast := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &fastCalls)))
+	slow.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	fast.Params.Profiles = slow.Params.Profiles
+	bsm := bsmWithSessListExt([]*BroadcastSession{fast, slow}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0}
+	start := time.Now()
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, start)
+	pctx, pcancel := context.WithDeadline(ctx, budget.deadline())
+	defer pcancel()
+	urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	took := time.Since(start)
 
 	assert.NoError(err)
-	assert.Equal(trustedSess, trustedResult.Session)
-	assert.Len(untrustedResults, 3)
-	assert.Equal(untrustedSess1, untrustedResults[0].Session)
+	assert.Len(urls, 1)
+	assert.EqualValues(1, slowCalls.Load())
+	assert.EqualValues(1, fastCalls.Load())
+	// Hedge fires at 0.6 x 1s; the result must not wait for the slow orchestrator.
+	assert.Less(took, 1500*time.Millisecond)
+	// The fast orchestrator is reused next; the slow one is idle in the selector.
+	assert.Contains(bsm.trustedPool.lastSess, fast)
+	assert.NotContains(bsm.trustedPool.lastSess, slow)
+	assert.Contains(bsm.trustedPool.sessMap, slow.Transcoder(), "losing a hedge is not a failure")
+	assert.Empty(slow.SegsInFlight)
+}
+
+func TestProcessSegment_BudgetCapsSingleOrchestrator(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	stalled := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 10*time.Second, "", &calls)))
+	stalled.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	bsm := bsmWithSessListExt([]*BroadcastSession{stalled}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0}
+	start := time.Now()
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, start)
+	pctx, pcancel := context.WithDeadline(ctx, budget.deadline())
+	defer pcancel()
+	_, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	took := time.Since(start)
+
+	assert.Error(err)
+	assert.Equal(http.StatusServiceUnavailable, pushErrorStatus(err))
+	assert.Less(took, budget.total+200*time.Millisecond)
+	assert.NotContains(bsm.trustedPool.sessMap, stalled.Transcoder(), "an orchestrator that hits its cap is suspended")
+}
+
+func TestRecordRoundTrip_SuspendsAfterTwoSlowSegments(t *testing.T) {
+	assert := assert.New(t)
+	sess := StubBroadcastSession("https://slow")
+	bsm := bsmWithSessListExt([]*BroadcastSession{sess}, nil, true)
+	seg := &stream.HLSSegment{Duration: 1.0}
+
+	bsm.recordRoundTrip(context.Background(), sess, seg, 1500*time.Millisecond)
+	assert.Contains(bsm.trustedPool.sessMap, sess.Transcoder())
+	bsm.recordRoundTrip(context.Background(), sess, seg, 500*time.Millisecond)
+	bsm.recordRoundTrip(context.Background(), sess, seg, 1500*time.Millisecond)
+	assert.Contains(bsm.trustedPool.sessMap, sess.Transcoder(), "strikes must be consecutive")
+	bsm.recordRoundTrip(context.Background(), sess, seg, 1500*time.Millisecond)
+	assert.NotContains(bsm.trustedPool.sessMap, sess.Transcoder())
+	assert.Greater(bsm.trustedPool.sus.Suspended(sess.Transcoder()), 0)
 }
 
 func TestMaxPrice(t *testing.T) {

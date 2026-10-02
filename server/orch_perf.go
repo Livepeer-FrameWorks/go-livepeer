@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type perfObservation struct {
 	workload, capKey, endpoint string
 	meta                       perfMeta
 	xcodeSpeed, rttSpeed       float64
+	rttMs                      float64
 	ok                         bool
 }
 
@@ -59,6 +61,10 @@ type orchPerfReader interface {
 // (observability); rtt_ewma is the end-to-end speed selection ranks on. The
 // service_addr / payment_recipient / resolved_ip metadata attribute the endpoint
 // without being part of its identity. samples/fails/last_at are observability.
+// rtt_ms_ewma / rtt_ms_dev are the mean round trip in milliseconds and its mean
+// absolute deviation over successful segments (seeded with half the first
+// sample, as TCP seeds RTTVAR); the hedge delay derives a p90 estimate from
+// them.
 var orchPerfEWMAScript = redis.NewScript(`
 local key = KEYS[1]
 local alpha = tonumber(ARGV[1])
@@ -73,6 +79,17 @@ if curXc == nil then
 else
 	local curRtt = tonumber(redis.call('HGET', key, 'rtt_ewma')) or rtt
 	redis.call('HSET', key, 'xcode_ewma', alpha*xc + (1-alpha)*curXc, 'rtt_ewma', alpha*rtt + (1-alpha)*curRtt)
+end
+local rttMs = tonumber(ARGV[10])
+if ok == 1 and rttMs ~= nil and rttMs > 0 then
+	local curMs = tonumber(redis.call('HGET', key, 'rtt_ms_ewma'))
+	if curMs == nil then
+		redis.call('HSET', key, 'rtt_ms_ewma', rttMs, 'rtt_ms_dev', rttMs / 2)
+	else
+		local curDev = tonumber(redis.call('HGET', key, 'rtt_ms_dev')) or 0
+		local diff = rttMs - curMs
+		redis.call('HSET', key, 'rtt_ms_ewma', curMs + alpha*diff, 'rtt_ms_dev', curDev + alpha*(math.abs(diff) - curDev))
+	end
 end
 redis.call('HSET', key, 'service_addr', ARGV[7], 'payment_recipient', ARGV[8], 'resolved_ip', ARGV[9])
 redis.call('HINCRBY', key, 'samples', 1)
@@ -98,8 +115,9 @@ type perfMeta struct {
 // recordPerf folds one segment's observed speed factors into the durable EWMA
 // for (region, workload, capKey, endpoint). A failed segment is recorded as a
 // zero-speed sample so a flaky-but-unsuspended instance sinks in ranking;
-// suspension still hard-removes separately. No-op when Redis is unconfigured.
-func (s *orchHealthStore) recordPerf(workload, capKey, endpoint string, meta perfMeta, xcodeSpeed, rttSpeed float64, ok bool) {
+// suspension still hard-removes separately. rttMs is the successful round trip
+// in milliseconds. No-op when Redis is unconfigured.
+func (s *orchHealthStore) recordPerf(workload, capKey, endpoint string, meta perfMeta, xcodeSpeed, rttSpeed, rttMs float64, ok bool) {
 	if s == nil || s.rdb == nil || endpoint == "" {
 		return
 	}
@@ -111,13 +129,14 @@ func (s *orchHealthStore) recordPerf(workload, capKey, endpoint string, meta per
 		okv = 0
 		xcodeSpeed = 0
 		rttSpeed = 0
+		rttMs = 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), orchHealthOpTimeout)
 	defer cancel()
 	key := perfKey(s.region, workload, capKey, endpoint)
 	if err := orchPerfEWMAScript.Run(ctx, s.rdb, []string{key},
 		orchPerfEWMAAlpha, xcodeSpeed, rttSpeed, okv, int(orchPerfTTL.Seconds()), time.Now().Unix(),
-		meta.serviceAddr, meta.paymentRecipient, meta.resolvedIP).Err(); err != nil {
+		meta.serviceAddr, meta.paymentRecipient, meta.resolvedIP, rttMs).Err(); err != nil {
 		glog.Errorf("orch perf: record failed endpoint=%s: %v", endpoint, err)
 	}
 }
@@ -149,6 +168,65 @@ type orchPerf struct {
 	cache   map[string]float64
 	fetched map[string]bool
 	cacheAt time.Time
+
+	// p90 memoizes roundTripP90 per endpoint for orchPerfMemoTTL.
+	p90 map[string]p90Memo
+}
+
+type p90Memo struct {
+	d  time.Duration
+	ok bool
+	at time.Time
+}
+
+// orchRTTDeviations is how many mean absolute deviations above the mean round
+// trip roundTripP90 places its estimate. For a normal distribution 1.6 mean
+// deviations is the 90th percentile; round trips are right-skewed, so 2 keeps
+// the estimate at or above the true p90.
+const orchRTTDeviations = 2.0
+
+// roundTripP90 estimates the endpoint's 90th-percentile round trip from the
+// shared store. ok is false when the endpoint has no successful round trip on
+// record.
+func (p *orchPerf) roundTripP90(endpoint string) (time.Duration, bool) {
+	if p == nil || p.store == nil || p.store.rdb == nil || endpoint == "" {
+		return 0, false
+	}
+	p.mu.Lock()
+	if m, hit := p.p90[endpoint]; hit && time.Since(m.at) < orchPerfMemoTTL {
+		p.mu.Unlock()
+		return m.d, m.ok
+	}
+	p.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), sharedSuspendedTimeout)
+	defer cancel()
+	vals, err := p.store.rdb.HMGet(ctx, p.key(endpoint), "rtt_ms_ewma", "rtt_ms_dev").Result()
+	var memo p90Memo
+	if err != nil {
+		glog.Errorf("orch perf: round trip read failed endpoint=%s: %v", endpoint, err)
+	} else if mean, okMean := redisFloat(vals[0]); okMean && mean > 0 {
+		dev, _ := redisFloat(vals[1])
+		memo.d = time.Duration((mean + orchRTTDeviations*dev) * float64(time.Millisecond))
+		memo.ok = true
+	}
+	memo.at = time.Now()
+	p.mu.Lock()
+	if p.p90 == nil {
+		p.p90 = map[string]p90Memo{}
+	}
+	p.p90[endpoint] = memo
+	p.mu.Unlock()
+	return memo.d, memo.ok
+}
+
+func redisFloat(v interface{}) (float64, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
 }
 
 func (p *orchPerf) key(endpoint string) string {
@@ -224,7 +302,8 @@ func recordOrchPerf(sess *BroadcastSession, seg *stream.HLSSegment, uploadDur, t
 		return
 	}
 	xcodeSpeed := segMs / math.Max(float64(transcodeDur.Milliseconds()), 1)
-	rttSpeed := segMs / math.Max(float64((uploadDur+transcodeDur).Milliseconds()), 1)
+	rttMs := math.Max(float64((uploadDur + transcodeDur).Milliseconds()), 1)
+	rttSpeed := segMs / rttMs
 	ok := retErr == nil && result != nil
 
 	meta := perfMeta{
@@ -238,7 +317,7 @@ func recordOrchPerf(sess *BroadcastSession, seg *stream.HLSSegment, uploadDur, t
 	capKey := common.ProfilesNames(sess.Params.Profiles)
 	store.enqueuePerf(perfObservation{
 		workload: workload, capKey: capKey, endpoint: endpoint, meta: meta,
-		xcodeSpeed: xcodeSpeed, rttSpeed: rttSpeed, ok: ok,
+		xcodeSpeed: xcodeSpeed, rttSpeed: rttSpeed, rttMs: rttMs, ok: ok,
 	})
 }
 
@@ -251,7 +330,7 @@ func (s *orchHealthStore) enqueuePerf(observation perfObservation) bool {
 		for range orchPerfWorkers {
 			go func() {
 				for observation := range s.perfQueue {
-					s.recordPerf(observation.workload, observation.capKey, observation.endpoint, observation.meta, observation.xcodeSpeed, observation.rttSpeed, observation.ok)
+					s.recordPerf(observation.workload, observation.capKey, observation.endpoint, observation.meta, observation.xcodeSpeed, observation.rttSpeed, observation.rttMs, observation.ok)
 				}
 			}()
 		}

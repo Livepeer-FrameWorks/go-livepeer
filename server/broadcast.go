@@ -223,6 +223,82 @@ func (sp *SessionPool) suspend(orch string) {
 	sp.sus.suspend(orch, penalty)
 }
 
+// suspendedElsewhere reports whether sess's orchestrator carries a shared
+// suspension while the pool still has other sessions to use. The caller holds
+// sp.lock.
+func (sp *SessionPool) suspendedElsewhere(sess *BroadcastSession) bool {
+	if sp.sel.Size() == 0 && len(removeSessionFromList(sp.lastSess, sess)) == 0 {
+		return false
+	}
+	return sp.sus.sharedSuspended(sess.Transcoder())
+}
+
+func (sp *SessionPool) unsuspend(orch string) {
+	poolSize := math.Max(1, float64(sp.poolSize))
+	numOrchs := math.Max(1, float64(sp.numOrchs))
+	penalty := int(math.Ceil(poolSize / numOrchs))
+	sp.sus.unsuspend(orch, penalty)
+}
+
+// selectIdle takes a session other than exclude from the selector, skipping
+// sessions that are no longer in the pool. The caller holds no pool lock.
+func (sp *SessionPool) selectIdle(ctx context.Context, exclude *BroadcastSession) *BroadcastSession {
+	sp.lock.Lock()
+	defer sp.lock.Unlock()
+	if sp.poolSize == 0 {
+		return nil
+	}
+	var skipped []*BroadcastSession
+	defer func() {
+		for _, s := range skipped {
+			sp.sel.Complete(s)
+		}
+	}()
+	for sp.sel.Size() > 0 {
+		sess := sp.sel.Select(ctx)
+		if sess == nil {
+			return nil
+		}
+		if sess == exclude || sess.Transcoder() == exclude.Transcoder() {
+			skipped = append(skipped, sess)
+			continue
+		}
+		if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
+			continue
+		}
+		return sess
+	}
+	return nil
+}
+
+// release drops one in-flight segment from a session whose submission was
+// cancelled and returns the session to the selector once it is idle. A
+// session that is no longer in the pool is ignored.
+func (sp *SessionPool) release(sess *BroadcastSession) {
+	sp.lock.Lock()
+	defer sp.lock.Unlock()
+	if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
+		return
+	}
+	if remaining, _ := sess.popSegInFlight(); remaining > 0 {
+		return
+	}
+	sp.lastSess = removeSessionFromList(sp.lastSess, sess)
+	sp.sel.Complete(sess)
+}
+
+// promote adds a session to the reuse list consulted by selectSessions.
+func (sp *SessionPool) promote(sess *BroadcastSession) {
+	sp.lock.Lock()
+	defer sp.lock.Unlock()
+	if existing, ok := sp.sessMap[sess.Transcoder()]; !ok || existing != sess {
+		return
+	}
+	if !includesSession(sp.lastSess, sess) {
+		sp.lastSess = append(sp.lastSess, sess)
+	}
+}
+
 func (sp *SessionPool) refreshSessions(ctx context.Context) {
 	// A pool sized from an empty orchestrator class (for example the trusted
 	// pool when discovery marks every on-chain orchestrator untrusted) has
@@ -442,6 +518,16 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 			selection time by retrying the selection.
 		*/
 
+		if _, ok := sp.sessMap[sess.Transcoder()]; ok && sp.suspendedElsewhere(sess) {
+			// Another stream or gateway suspended this orchestrator in the
+			// shared store; drop it while other sessions remain.
+			clog.Infof(ctx, "Removing orch=%v suspended by another stream or gateway", sess.Transcoder())
+			sp.cleanupSession(sess.PMSessionID)
+			delete(sp.sessMap, sess.Transcoder())
+			sess.SegsInFlight = nil
+			sp.lastSess = removeSessionFromList(sp.lastSess, sess)
+			continue
+		}
 		if _, ok := sp.sessMap[sess.Transcoder()]; ok {
 			selectedSessions = append(selectedSessions, sess)
 
@@ -538,6 +624,10 @@ type BroadcastSessionsManager struct {
 
 	trustedPool   *SessionPool
 	untrustedPool *SessionPool
+
+	// perf reads round-trip estimates from the shared performance store; nil
+	// without Redis.
+	perf *orchPerf
 }
 
 func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *core.StreamParameters) *BroadcastSessionsManager {
@@ -584,6 +674,9 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 		trustedPool:   NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, trustedSel),
 		untrustedPool: NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, untrustedSel),
 	}
+	if p, ok := perfReader.(*orchPerf); ok {
+		bsm.perf = p
+	}
 	latencyThreshold := latencyThresholdForWorkload(params)
 	bsm.trustedPool.latencyThreshold = latencyThreshold
 	bsm.untrustedPool.latencyThreshold = latencyThreshold
@@ -600,6 +693,83 @@ func (bsm *BroadcastSessionsManager) suspendAndRemoveOrch(sess *BroadcastSession
 		bsm.trustedPool.suspend(sess.OrchestratorInfo.GetTranscoder())
 		bsm.trustedPool.removeSession(sess)
 	}
+}
+
+func (bsm *BroadcastSessionsManager) poolFor(sess *BroadcastSession) *SessionPool {
+	if sess.OrchestratorScore == common.Score_Untrusted {
+		return bsm.untrustedPool
+	}
+	return bsm.trustedPool
+}
+
+// unsuspendOrch lifts the suspension suspendAndRemoveOrch placed on orch. The
+// session itself stays removed; discovery re-adds the orchestrator on the next
+// refresh.
+func (bsm *BroadcastSessionsManager) unsuspendOrch(orch string) {
+	for _, pool := range []*SessionPool{bsm.trustedPool, bsm.untrustedPool} {
+		pool.unsuspend(orch)
+	}
+}
+
+// selectHedgeSession returns a session other than exclude that has no
+// segments in flight, or nil when none is available.
+func (bsm *BroadcastSessionsManager) selectHedgeSession(ctx context.Context, exclude *BroadcastSession) *BroadcastSession {
+	bsm.sessLock.Lock()
+	defer bsm.sessLock.Unlock()
+	if sess := bsm.untrustedPool.selectIdle(ctx, exclude); sess != nil {
+		return sess
+	}
+	return bsm.trustedPool.selectIdle(ctx, exclude)
+}
+
+// releaseSession hands back a session whose submission was cancelled because
+// another orchestrator answered the segment first.
+func (bsm *BroadcastSessionsManager) releaseSession(sess *BroadcastSession) {
+	bsm.sessLock.Lock()
+	defer bsm.sessLock.Unlock()
+	bsm.poolFor(sess).release(sess)
+}
+
+// promoteSession makes a hedge session that answered a segment eligible for
+// reuse on the next segment, like a session chosen by selectSessions.
+func (bsm *BroadcastSessionsManager) promoteSession(sess *BroadcastSession) {
+	bsm.sessLock.Lock()
+	defer bsm.sessLock.Unlock()
+	bsm.poolFor(sess).promote(sess)
+}
+
+// roundTripP90 is the orchestrator's estimated 90th-percentile round trip from
+// the shared performance store.
+func (bsm *BroadcastSessionsManager) roundTripP90(sess *BroadcastSession) (time.Duration, bool) {
+	if bsm.perf == nil {
+		return 0, false
+	}
+	return bsm.perf.roundTripP90(sess.Transcoder())
+}
+
+// recordRoundTrip suspends an orchestrator after slowStrikeLimit consecutive
+// segments whose round trip exceeded the segment duration. The round-trip
+// sample itself already lowered the orchestrator's shared performance score.
+func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, roundTrip time.Duration) {
+	segDur := time.Duration(seg.Duration * float64(time.Second))
+	if segDur <= 0 {
+		return
+	}
+	sess.lock.Lock()
+	if roundTrip <= segDur {
+		sess.slowStrikes = 0
+		sess.lock.Unlock()
+		return
+	}
+	sess.slowStrikes++
+	strikes := sess.slowStrikes
+	sess.lock.Unlock()
+	if strikes < slowStrikeLimit {
+		return
+	}
+	clog.Warningf(ctx, "Suspending orch=%s: %d consecutive round trips longer than the segment duration roundTrip=%s segDur=%s",
+		sess.Transcoder(), strikes, roundTrip, segDur)
+	bsm.suspendAndRemoveOrch(sess)
 }
 
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
@@ -656,58 +826,6 @@ func (bsm *BroadcastSessionsManager) cleanup(ctx context.Context) {
 
 	bsm.trustedPool.cleanup()
 	bsm.untrustedPool.cleanup()
-}
-
-func (bsm *BroadcastSessionsManager) chooseResults(ctx context.Context, seg *stream.HLSSegment, submitResultsCh chan *SubmitResult,
-	submittedCount int) (*BroadcastSession, *ReceivedTranscodeResult, error) {
-
-	trustedResult, untrustedResults, err := bsm.collectResults(submitResultsCh, submittedCount)
-
-	if trustedResult == nil {
-		// no results from trusted orch, using anything
-		if len(untrustedResults) == 0 {
-			// no results at all
-			return nil, nil, fmt.Errorf("error transcoding: no results at all err=%w", err)
-		}
-		return untrustedResults[0].Session, untrustedResults[0].TranscodeResult, untrustedResults[0].Err
-	}
-
-	return trustedResult.Session, trustedResult.TranscodeResult, trustedResult.Err
-}
-
-func (bsm *BroadcastSessionsManager) collectResults(submitResultsCh chan *SubmitResult, submittedCount int) (*SubmitResult, []*SubmitResult, error) {
-	submitResults := make([]*SubmitResult, submittedCount)
-
-	// can have different strategies - for example, just use first one
-	// and ignore everything else
-	// for now wait for all the results
-	for i := 0; i < submittedCount; i++ {
-		submitResults[i] = <-submitResultsCh
-	}
-	// Prefer a successful trusted result, otherwise use the first successful
-	// untrusted result.
-	var trustedResults *SubmitResult
-	var untrustedResults []*SubmitResult
-	var err error
-	for _, res := range submitResults {
-		if res.Err == nil && res.TranscodeResult != nil {
-			if res.Session.OrchestratorScore == common.Score_Trusted {
-				trustedResults = res
-			} else {
-				untrustedResults = append(untrustedResults, res)
-			}
-		}
-		if res.Err != nil {
-			err = res.Err
-			if isNonRetryableError(err) {
-				bsm.completeSession(context.TODO(), res.Session, false)
-			} else {
-				bsm.suspendAndRemoveOrch(res.Session)
-			}
-		}
-	}
-
-	return trustedResults, untrustedResults, err
 }
 
 // the caller needs to ensure bsm.sessLock is acquired before calling this.
@@ -952,8 +1070,12 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 	if cxn.params != nil && len(cxn.params.Profiles) == 0 {
 		return []string{}, nil
 	}
+	_, budgeted := segmentBudgetFromContext(ctx)
+	badInput := badInputTracker{}
+	badInputReached := false
 	for len(attempts) < MaxAttempts {
-		// if transcodeSegment fails, retry; rudimentary
+		// Each attempt runs on a different orchestrator: a failing one is
+		// suspended and removed before the next selection.
 		var info *data.TranscodeAttemptInfo
 		urls, info, err = transcodeSegment(ctx, cxn, seg, name, segPar)
 		attempts = append(attempts, *info)
@@ -970,7 +1092,24 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 			rtmpStrm.Close()
 			break
 		}
-		if isNonRetryableError(err) {
+		if badInput.observe(err) {
+			// Distinct orchestrators agree the segment cannot be transcoded, so
+			// the input is at fault and their suspensions are lifted.
+			var oe *orchError
+			errors.As(err, &oe)
+			for _, orch := range badInput.orchs(oe.err.Error()) {
+				cxn.sessManager.unsuspendOrch(orch)
+			}
+			clog.Warningf(ctx, "Not retrying current segment: %d orchestrators returned the same non-retryable error err=%q", badInputConsensus, err)
+			if monitor.Enabled {
+				monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorNonRetryable, nonce, seg.SeqNo, err, true)
+			}
+			err = fmt.Errorf("%w: %w", errBadInput, err)
+			badInputReached = true
+			break
+		}
+		var oe *orchError
+		if !errors.As(err, &oe) && isNonRetryableError(err) {
 			clog.Warningf(ctx, "Not retrying current segment due to non-retryable error err=%q", err)
 			if monitor.Enabled {
 				monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorNonRetryable, nonce, seg.SeqNo, err, true)
@@ -978,14 +1117,18 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 			break
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			if budgeted && errors.Is(ctxErr, context.DeadlineExceeded) {
+				err = fmt.Errorf("%w: %w", errSegmentBudgetExhausted, err)
+			} else {
+				err = ctxErr
+			}
 			clog.Warningf(ctx, "Not retrying current segment due to context cancellation err=%q", err)
 			if monitor.Enabled {
 				monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorCtxCancelled, nonce, seg.SeqNo, err, true)
 			}
 			break
 		}
-		// recoverable error, retry
+		// orchestrator-scoped or recoverable error, retry on another orchestrator
 	}
 
 	if MetadataQueue != nil {
@@ -1004,7 +1147,7 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 			}
 		}()
 	}
-	if len(attempts) == MaxAttempts && err != nil {
+	if len(attempts) == MaxAttempts && err != nil && !badInputReached && !errors.Is(err, errSegmentBudgetExhausted) {
 		err = fmt.Errorf("%w: %w", maxTranscodeAttempts, err)
 		if monitor.Enabled {
 			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorMaxAttempts, nonce, seg.SeqNo, err, true)
@@ -1053,61 +1196,151 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	if monitor.Enabled {
 		monitor.TranscodeTry(ctx, nonce, seg.SeqNo)
 	}
-	if len(sessions) == 1 {
-		// shortcut for most common path
-		sess := sessions[0]
-		if seg, err = prepareForTranscoding(ctx, cxn, sess, seg, name); err != nil {
-			return nil, info, err
+	sess, segUsed, res, roundTrip, err := submitHedged(ctx, cxn, sessions[0], seg, name, segPar)
+	if err != nil {
+		return nil, info, err
+	}
+	info.Orchestrator = data.OrchestratorMetadata{
+		TranscoderUri: sess.Transcoder(),
+		Address:       sess.Address(),
+	}
+	urls, err = downloadResults(ctx, cxn, segUsed, sess, res)
+	if err == nil {
+		cxn.sessManager.recordRoundTrip(ctx, sess, seg, roundTrip)
+	}
+	return urls, info, err
+}
+
+// submission is one in-flight SubmitSegment call of a segment attempt.
+type submission struct {
+	sess    *BroadcastSession
+	seg     *stream.HLSSegment
+	start   time.Time
+	cancel  context.CancelCauseFunc
+	settled bool // its result has been handled
+}
+
+// submitHedged submits seg to primary and, when the segment has a budget and
+// primary has not answered within hedgeDelay, also to one more orchestrator.
+// The first successful result wins and the other submission is cancelled.
+// Every orchestrator that returns an error is suspended and removed, and its
+// error is returned as an *orchError unless another submission succeeds.
+// At most one hedge is started per attempt, so a hedged segment costs one
+// extra payment.
+func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSession, seg *stream.HLSSegment, name string,
+	segPar *core.SegmentParameters) (*BroadcastSession, *stream.HLSSegment, *ReceivedTranscodeResult, time.Duration, error) {
+
+	bsm := cxn.sessManager
+	budget, budgeted := segmentBudgetFromContext(ctx)
+	resc := make(chan *SubmitResult, 2)
+	var subs []*submission
+
+	start := func(sess *BroadcastSession) error {
+		segOut, err := prepareForTranscoding(ctx, cxn, sess, seg, name)
+		if err != nil {
+			return &orchError{orch: sess.Transcoder(), err: err}
 		}
-		sess.pushSegInFlight(seg)
-		var res *ReceivedTranscodeResult
-		res, err = SubmitSegment(ctx, sess.Clone(), seg, segPar, nonce, false)
-		if err != nil || res == nil {
-			if isNonRetryableError(err) {
-				cxn.sessManager.completeSession(ctx, sess, false)
-				return nil, info, err
+		sess.pushSegInFlight(segOut)
+		sctx, cancel := context.WithCancelCause(ctx)
+		if budgeted {
+			var cancelTimeout context.CancelFunc
+			sctx, cancelTimeout = context.WithTimeout(sctx, budget.orchCap())
+			parentCancel := cancel
+			cancel = func(cause error) { parentCancel(cause); cancelTimeout() }
+		}
+		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel})
+		submitMultiSession(sctx, sess, segOut, segPar, cxn.nonce, resc)
+		return nil
+	}
+	find := func(sess *BroadcastSession) *submission {
+		for _, s := range subs {
+			if s.sess == sess {
+				return s
 			}
-			cxn.sessManager.suspendAndRemoveOrch(sess)
-			if res == nil && err == nil {
+		}
+		return nil
+	}
+
+	if err := start(primary); err != nil {
+		return nil, nil, nil, 0, err
+	}
+
+	var hedgeC <-chan time.Time
+	if budgeted {
+		p90, ok := bsm.roundTripP90(primary)
+		t := time.NewTimer(hedgeDelay(seg, p90, ok))
+		defer t.Stop()
+		hedgeC = t.C
+	}
+	hedged := false
+	inflight := 1
+	var lastErr error
+	for inflight > 0 {
+		select {
+		case r := <-resc:
+			inflight--
+			sub := find(r.Session)
+			sub.settled = true
+			if r.Err == nil && r.TranscodeResult != nil {
+				for _, other := range subs {
+					if !other.settled {
+						other.settled = true
+						other.cancel(errHedgeLost)
+						bsm.releaseSession(other.sess)
+					}
+				}
+				sub.cancel(nil)
+				if hedged {
+					won := sub.sess != primary
+					if won {
+						bsm.promoteSession(sub.sess)
+					}
+					clog.Infof(ctx, "Hedged segment answered by orch=%s hedgeWon=%v", sub.sess.Transcoder(), won)
+					if monitor.Enabled {
+						monitor.SegmentHedged(won)
+					}
+				}
+				return sub.sess, sub.seg, r.TranscodeResult, time.Since(sub.start), nil
+			}
+			sub.cancel(nil)
+			err := r.Err
+			if err == nil {
 				err = errors.New("empty response")
 			}
-			return nil, info, err
-		}
-		urls, err = downloadResults(ctx, cxn, seg, sess, res)
-		return urls, info, err
-	} else {
-		resc := make(chan *SubmitResult, len(sessions))
-		submittedCount := 0
-		for _, sess := range sessions {
-			// todo: run it in own goroutine (move to submitSegment?)
-			seg2, err := prepareForTranscoding(ctx, cxn, sess, seg, name)
-			if err != nil || seg2 == nil {
+			if ctx.Err() != nil {
+				// The segment's own context ended (budget spent or caller
+				// gone); that says nothing about this orchestrator.
+				bsm.releaseSession(r.Session)
+				lastErr = err
 				continue
 			}
-			// cxn.sessManager.pushSegInFlight(sess, seg)
-			sess.pushSegInFlight(seg2)
-			submitMultiSession(ctx, sess, seg2, segPar, nonce, resc)
-			submittedCount++
-		}
-		if submittedCount == 0 {
-			return nil, info, fmt.Errorf("error: not submitted anything")
-		}
-
-		sess, results, err := cxn.sessManager.chooseResults(ctx, seg, resc, submittedCount)
-		if err != nil {
-			clog.Errorf(ctx, "Error choosing results: err=%q", err)
-			return nil, info, err
-		}
-		for _, usedSession := range sessions {
-			if usedSession != sess {
-				// return session that we're not using
-				cxn.sessManager.completeSession(ctx, usedSession, true)
+			bsm.suspendAndRemoveOrch(r.Session)
+			lastErr = &orchError{orch: r.Session.Transcoder(), err: err}
+		case <-hedgeC:
+			hedgeC = nil
+			if !budget.takeHedge() {
+				clog.V(common.DEBUG).Infof(ctx, "Segment already hedged once; not hedging orch=%s", primary.Transcoder())
+				continue
 			}
+			hedge := bsm.selectHedgeSession(ctx, primary)
+			if hedge == nil {
+				clog.V(common.DEBUG).Infof(ctx, "No hedge orchestrator available orch=%s", primary.Transcoder())
+				continue
+			}
+			if err := start(hedge); err != nil {
+				// prepareForTranscoding already suspended and removed it.
+				clog.Warningf(ctx, "Could not start hedge orch=%s err=%q", hedge.Transcoder(), err)
+				continue
+			}
+			hedged = true
+			inflight++
+			clog.Infof(ctx, "Hedging segment: orch=%s has not answered, also submitting to orch=%s", primary.Transcoder(), hedge.Transcoder())
 		}
-
-		urls, err = downloadResults(ctx, cxn, seg, sess, results)
-		return urls, info, err
 	}
+	if hedged && monitor.Enabled {
+		monitor.SegmentHedged(false)
+	}
+	return nil, nil, nil, 0, lastErr
 }
 
 type SubmitResult struct {
@@ -1479,8 +1712,15 @@ func isNonRetryableError(err error) bool {
 			return true
 		}
 	}
-	if errors.Is(err, maxTranscodeAttempts) || errors.Is(err, errSeqPayloadConflict) || errors.Is(err, errSeqOutsideReplayWindow) {
+	if errors.Is(err, errSeqPayloadConflict) || errors.Is(err, errSeqOutsideReplayWindow) {
 		return true
 	}
 	return false
+}
+
+// isBadInputError reports errors that describe the pushed segment itself
+// rather than an orchestrator: conflicting or out-of-window sequence reuse, and
+// a segment that badInputConsensus orchestrators rejected the same way.
+func isBadInputError(err error) bool {
+	return errors.Is(err, errBadInput) || errors.Is(err, errSeqPayloadConflict) || errors.Is(err, errSeqOutsideReplayWindow)
 }

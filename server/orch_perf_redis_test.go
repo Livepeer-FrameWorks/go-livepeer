@@ -25,15 +25,15 @@ func TestRecordPerf_EWMAAndMetadata(t *testing.T) {
 	meta := perfMeta{serviceAddr: "0xservice", paymentRecipient: "0xrecipient", resolvedIP: "1.2.3.4"}
 
 	// First observation seeds the EWMA with the raw rtt speed.
-	store.recordPerf("vod", "240p", ep, meta, 4.0 /*xcode*/, 2.0 /*rtt*/, true)
+	store.recordPerf("vod", "240p", ep, meta, 4.0 /*xcode*/, 2.0 /*rtt*/, 1000, true)
 	require.InDelta(t, 2.0, store.perfReader("vod", "240p").scores([]string{ep})[ep], 1e-9)
 
 	// A faster sample pulls the rtt EWMA up (alpha 0.3): 0.3*6 + 0.7*2 = 3.2.
-	store.recordPerf("vod", "240p", ep, meta, 8.0, 6.0, true)
+	store.recordPerf("vod", "240p", ep, meta, 8.0, 6.0, 1000, true)
 	require.InDelta(t, 3.2, store.perfReader("vod", "240p").scores([]string{ep})[ep], 1e-9)
 
 	// A failure is a zero-speed sample that drags the EWMA down: 0.3*0 + 0.7*3.2 = 2.24.
-	store.recordPerf("vod", "240p", ep, meta, 1.0, 1.0, false)
+	store.recordPerf("vod", "240p", ep, meta, 1.0, 1.0, 1000, false)
 	require.InDelta(t, 2.24, store.perfReader("vod", "240p").scores([]string{ep})[ep], 1e-9)
 
 	// Metadata + counters recorded as attribution, not identity.
@@ -50,8 +50,8 @@ func TestPerfReader_FetchesNewEndpointWithinMemoWindow(t *testing.T) {
 	store := newTestPerfStore(t)
 	a := "https://a.example:8935"
 	b := "https://b.example:8935"
-	store.recordPerf("vod", "240p", a, perfMeta{}, 5.0, 5.0, true)
-	store.recordPerf("vod", "240p", b, perfMeta{}, 9.0, 9.0, true)
+	store.recordPerf("vod", "240p", a, perfMeta{}, 5.0, 5.0, 400, true)
+	store.recordPerf("vod", "240p", b, perfMeta{}, 9.0, 9.0, 200, true)
 
 	reader := store.perfReader("vod", "240p")
 	// First call caches only A.
@@ -61,6 +61,47 @@ func TestPerfReader_FetchesNewEndpointWithinMemoWindow(t *testing.T) {
 	second := reader.scores([]string{a, b})
 	require.InDelta(t, 5.0, second[a], 1e-9)
 	require.InDelta(t, 9.0, second[b], 1e-9)
+}
+
+func TestRoundTripP90_FromSharedStore(t *testing.T) {
+	store := newTestPerfStore(t)
+	ep := "https://orch.example:8935"
+	reader := store.perfReader("live", "240p").(*orchPerf)
+
+	_, ok := reader.roundTripP90(ep)
+	require.False(t, ok, "no history means no estimate")
+
+	// Seed: mean 1000 ms, deviation 500 ms. Then 600 ms: diff -400,
+	// mean 1000-0.3*400 = 880, dev 500+0.3*(400-500) = 470.
+	store.recordPerf("live", "240p", ep, perfMeta{}, 2.0, 2.0, 1000, true)
+	store.recordPerf("live", "240p", ep, perfMeta{}, 2.0, 2.0, 600, true)
+	// A failure does not move the round-trip estimate.
+	store.recordPerf("live", "240p", ep, perfMeta{}, 0, 0, 5000, false)
+
+	fresh := store.perfReader("live", "240p").(*orchPerf)
+	p90, ok := fresh.roundTripP90(ep)
+	require.True(t, ok)
+	require.InDelta(t, float64(880+2*470), float64(p90.Milliseconds()), 1)
+}
+
+func TestRedisSuspender_SharedAcrossStreamsAndUnsuspend(t *testing.T) {
+	store := newTestPerfStore(t)
+	orch := "https://orch.example:8935"
+	streamA := store.scoped("live", "240p")
+	streamB := store.scoped("live", "240p")
+	otherCaps := store.scoped("live", "720p")
+
+	require.False(t, streamB.sharedSuspended(orch))
+	streamA.suspend(orch, 2)
+	// streamB memoized "not suspended" a moment ago; a fresh suspender sees it at once.
+	require.True(t, store.scoped("live", "240p").sharedSuspended(orch))
+	require.False(t, otherCaps.sharedSuspended(orch), "suspension is scoped by capability set")
+
+	streamA.unsuspend(orch, 2)
+	require.Zero(t, streamA.Suspended(orch))
+	exists, err := store.rdb.Exists(context.Background(), streamA.(*redisSuspender).key(orch)).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "a fully lifted suspension leaves no key behind")
 }
 
 func TestPerfReader_UnknownEndpointOmitted(t *testing.T) {

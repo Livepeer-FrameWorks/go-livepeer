@@ -160,6 +160,10 @@ type BroadcastSession struct {
 	InitialPrice     *net.PriceInfo
 
 	InitialLatency time.Duration
+
+	// slowStrikes counts consecutive segments whose round trip exceeded the
+	// segment duration; access under the lock.
+	slowStrikes int
 }
 
 type GetOrchestratorInfoParams struct {

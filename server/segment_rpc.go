@@ -459,6 +459,12 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	)
 	defer func() {
 		emitFrameworksTranscodeOutcome(ctx, sess, seg, submitStart, uploadDurFW, transcodeDurFW, pixelCountFW, result, retErr)
+		// A submission cancelled because another orchestrator answered first
+		// measured nothing about this one, and a non-retryable (input-class)
+		// error says nothing about its speed.
+		if errors.Is(context.Cause(ctx), errHedgeLost) || (retErr != nil && isNonRetryableError(retErr)) {
+			return
+		}
 		recordOrchPerf(sess, seg, uploadDurFW, transcodeDurFW, result, retErr)
 	}()
 
@@ -531,34 +537,18 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		uploadTimeout = time.Duration(params.TimeoutMultiplier) * uploadTimeout
 		httpTimeout = time.Duration(params.TimeoutMultiplier) * httpTimeout
 	}
-	// When the FrameWorks workload contract supplies a response budget it is
-	// authoritative: the client waits DeadlineMs + socket margin, so the gateway
-	// caps each transcode attempt at DeadlineMs / MaxAttempts. The retry loop runs
-	// at most MaxAttempts attempts (a single attempt may submit to several
-	// orchestrators concurrently, but they share the same per-attempt deadline so
-	// the attempt's wall time is still bounded by it), so the worst-case total
-	// tracks the client's budget — the gateway returns a definitive result (or
-	// falls back) before the client's wall, instead of being killed mid-transcode
-	// and re-POSTed. (For a very small deadline the per-attempt floor
-	// MinSegmentUploadTimeout can dominate, so the total may exceed DeadlineMs
-	// slightly; the FrameWorks vod budget is far above that floor.) live leaves
-	// DeadlineMs unset and keeps the existing fail-fast timeout.
-	if params.DeadlineMs > 0 {
-		attempts := MaxAttempts
-		if attempts < 1 {
-			attempts = 1
+	// A segment budget (see segment_budget.go) arrives as the caller's context
+	// deadline and bounds the whole call, including the upload.
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining < httpTimeout {
+			httpTimeout = remaining
 		}
-		perAttempt := time.Duration(params.DeadlineMs) * time.Millisecond / time.Duration(attempts)
-		if perAttempt < common.MinSegmentUploadTimeout {
-			perAttempt = common.MinSegmentUploadTimeout
-		}
-		httpTimeout = perAttempt
 		if uploadTimeout > httpTimeout {
 			uploadTimeout = httpTimeout
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(clog.Clone(context.Background(), ctx), httpTimeout)
+	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
 	ti := sess.OrchestratorInfo

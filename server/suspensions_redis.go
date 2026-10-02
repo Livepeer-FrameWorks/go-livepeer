@@ -18,6 +18,11 @@ import (
 type orchSuspender interface {
 	Suspended(orch string) int
 	suspend(orch string, penalty int)
+	// unsuspend reverses a suspend of the same penalty.
+	unsuspend(orch string, penalty int)
+	// sharedSuspended reports a suspension recorded by any stream or gateway
+	// sharing the backend. It is consulted on every segment selection.
+	sharedSuspended(orch string) bool
 	signalRefresh()
 }
 
@@ -29,6 +34,11 @@ var (
 	orchHealthLiveTTL   = 10 * time.Minute
 	orchHealthVODTTL    = 2 * time.Minute
 	orchHealthOpTimeout = 1 * time.Second
+	// sharedSuspendedMemoTTL bounds how often segment selection reads an
+	// orchestrator's shared suspension; sharedSuspendedTimeout bounds one read
+	// so a slow Redis cannot stall selection.
+	sharedSuspendedMemoTTL = 1 * time.Second
+	sharedSuspendedTimeout = 100 * time.Millisecond
 )
 
 // orchHealthStore is the process-wide durable orchestrator health backend. When
@@ -146,6 +156,14 @@ type redisSuspender struct {
 	store    *orchHealthStore
 	workload string
 	capKey   string
+
+	memoMu sync.Mutex
+	memo   map[string]suspendedMemo
+}
+
+type suspendedMemo struct {
+	suspended bool
+	at        time.Time
 }
 
 func (r *redisSuspender) key(orch string) string {
@@ -179,6 +197,58 @@ func (r *redisSuspender) suspend(orch string, penalty int) {
 	if _, err := pipe.Exec(ctx); err != nil {
 		glog.Errorf("orch health: suspend failed orch=%s: %v", orch, err)
 	}
+	r.setMemo(orch, true)
+}
+
+// orchUnsuspendScript lowers the penalty and deletes the key once it reaches
+// zero, so discovery (which treats any non-zero penalty as suspended) sees the
+// orchestrator as healthy again.
+var orchUnsuspendScript = redis.NewScript(`
+local n = redis.call('DECRBY', KEYS[1], ARGV[1])
+if n <= 0 then redis.call('DEL', KEYS[1]) end
+return n
+`)
+
+func (r *redisSuspender) unsuspend(orch string, penalty int) {
+	if penalty <= 0 {
+		penalty = 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), orchHealthOpTimeout)
+	defer cancel()
+	n, err := orchUnsuspendScript.Run(ctx, r.store.rdb, []string{r.key(orch)}, penalty).Int()
+	if err != nil {
+		glog.Errorf("orch health: unsuspend failed orch=%s: %v", orch, err)
+		return
+	}
+	r.setMemo(orch, n > 0)
+}
+
+func (r *redisSuspender) sharedSuspended(orch string) bool {
+	r.memoMu.Lock()
+	m, ok := r.memo[orch]
+	r.memoMu.Unlock()
+	if ok && time.Since(m.at) < sharedSuspendedMemoTTL {
+		return m.suspended
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sharedSuspendedTimeout)
+	defer cancel()
+	n, err := r.store.rdb.Get(ctx, r.key(orch)).Int()
+	if err != nil && err != redis.Nil {
+		glog.Errorf("orch health: shared suspension read failed orch=%s: %v", orch, err)
+		return false
+	}
+	suspended := err == nil && n > 0
+	r.setMemo(orch, suspended)
+	return suspended
+}
+
+func (r *redisSuspender) setMemo(orch string, suspended bool) {
+	r.memoMu.Lock()
+	defer r.memoMu.Unlock()
+	if r.memo == nil {
+		r.memo = map[string]suspendedMemo{}
+	}
+	r.memo[orch] = suspendedMemo{suspended: suspended, at: time.Now()}
 }
 
 // signalRefresh is a no-op for the durable store: suspensions expire by

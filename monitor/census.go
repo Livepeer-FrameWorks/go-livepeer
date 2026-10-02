@@ -164,6 +164,8 @@ type (
 		mRecordingSaveErrors          *stats.Int64Measure
 		mRecordingSavedSegments       *stats.Int64Measure
 		mOrchestratorSwaps            *stats.Int64Measure
+		mSegmentHedges                *stats.Int64Measure
+		mSegmentHedgeWins             *stats.Int64Measure
 
 		// Metrics for sending payments
 		mTicketValueSent    *stats.Float64Measure
@@ -350,6 +352,8 @@ func InitCensus(nodeType NodeType, version string) {
 	census.mRecordingSaveErrors = stats.Int64("recording_save_errors", "Number of errors during save to the recording OS", "tot")
 	census.mRecordingSavedSegments = stats.Int64("recording_saved_segments", "Number of segments saved to the recording OS", "tot")
 	census.mOrchestratorSwaps = stats.Int64("orchestrator_swaps", "Number of orchestrator swaps mid-stream", "tot")
+	census.mSegmentHedges = stats.Int64("segment_hedges", "Number of segments submitted to a second orchestrator because the first was slow", "tot")
+	census.mSegmentHedgeWins = stats.Int64("segment_hedge_wins", "Number of hedged segments whose result came from the hedge orchestrator", "tot")
 
 	// Metrics for sending payments
 	census.mTicketValueSent = stats.Float64("ticket_value_sent", "TicketValueSent", "gwei")
@@ -761,6 +765,20 @@ func InitCensus(nodeType NodeType, version string) {
 			Measure:     census.mOrchestratorSwaps,
 			Description: "Number of orchestrator swaps mid-stream",
 			TagKeys:     baseTagsWithManifestID,
+			Aggregation: view.Count(),
+		},
+		{
+			Name:        "segment_hedges",
+			Measure:     census.mSegmentHedges,
+			Description: "Number of segments submitted to a second orchestrator because the first was slow",
+			TagKeys:     baseTags,
+			Aggregation: view.Count(),
+		},
+		{
+			Name:        "segment_hedge_wins",
+			Measure:     census.mSegmentHedgeWins,
+			Description: "Number of hedged segments whose result came from the hedge orchestrator",
+			TagKeys:     baseTags,
 			Aggregation: view.Count(),
 		},
 
@@ -1440,6 +1458,15 @@ func CapacityRejected() {
 func OrchestratorSwapped(ctx context.Context) {
 	if err := stats.RecordWithTags(census.ctx, manifestIDTag(ctx), census.mOrchestratorSwaps.M(1)); err != nil {
 		clog.Errorf(ctx, "Error recording metric err=%q", err)
+	}
+}
+
+// SegmentHedged records a segment submitted to a second orchestrator; won
+// reports whether the hedge orchestrator produced the result that was used.
+func SegmentHedged(won bool) {
+	stats.Record(census.ctx, census.mSegmentHedges.M(1))
+	if won {
+		stats.Record(census.ctx, census.mSegmentHedgeWins.M(1))
 	}
 }
 

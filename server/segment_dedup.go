@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/livepeer/go-livepeer/clog"
 	"github.com/livepeer/go-livepeer/core"
@@ -169,7 +170,12 @@ func (cxn *rtmpConnection) claimSeq(seq uint64, hash segmentFingerprint) error {
 // rendition URLs. This is what keeps a same-keyNo re-POST from MistProcLivepeer
 // safe instead of poisoning session state with a parallel transcode. Conflicting
 // reuse of the same sequence number is rejected.
-func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *stream.HLSSegment, segPar *core.SegmentParameters) ([]string, error) {
+//
+// The transcode runs under budget, detached from ctx: the request that started
+// it may be abandoned by the edge while a re-POST of the same segment joins it.
+// Each caller waits until its own budget's respondBy and then returns
+// errSegmentBudgetExhausted, leaving the transcode to finish for later joiners.
+func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *stream.HLSSegment, segPar *core.SegmentParameters, budget segmentBudget) ([]string, error) {
 	hash := segmentRequestFingerprint(seg, segPar)
 	if err := cxn.claimSeq(seg.SeqNo, hash); err != nil {
 		clog.Errorf(ctx, "Rejecting push: invalid sequence reuse seqNo=%d err=%q", seg.SeqNo, err)
@@ -180,11 +186,13 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 		return urls, nil
 	}
 	key := strconv.FormatUint(seg.SeqNo, 10) + ":" + hex.EncodeToString(hash[:])
-	v, err, shared := cxn.segDedup.Do(key, func() (interface{}, error) {
+	resc := cxn.segDedup.DoChan(key, func() (interface{}, error) {
 		if urls, ok := cxn.cachedSegURLs(seg.SeqNo, hash); ok {
 			return urls, nil
 		}
-		urls, err := processSegment(ctx, cxn, seg, segPar)
+		pctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), budget.deadline())
+		defer cancel()
+		urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, segPar)
 		// Only cache a real, non-empty transcode. An empty result (no
 		// orchestrators available, or a view-only stream) must not be cached: a
 		// later re-push of the same segment should re-attempt rather than be
@@ -194,12 +202,22 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 		}
 		return urls, err
 	})
-	if shared {
-		clog.Infof(ctx, "Joined in-flight transcode for duplicate push seqNo=%d", seg.SeqNo)
+	respond := time.NewTimer(time.Until(budget.respondBy()))
+	defer respond.Stop()
+	select {
+	case r := <-resc:
+		if r.Shared {
+			clog.Infof(ctx, "Joined in-flight transcode for duplicate push seqNo=%d", seg.SeqNo)
+		}
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		urls, _ := r.Val.([]string)
+		return urls, nil
+	case <-respond.C:
+		clog.Warningf(ctx, "Segment budget exhausted before a result seqNo=%d budget=%s", seg.SeqNo, budget.total)
+		return nil, errSegmentBudgetExhausted
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	if err != nil {
-		return nil, err
-	}
-	urls, _ := v.([]string)
-	return urls, nil
 }

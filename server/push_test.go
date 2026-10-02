@@ -116,7 +116,7 @@ func TestPush_ShouldReturn422ForNonRetryable(t *testing.T) {
 	assert.NoError(err)
 	assert.Contains(string(body), "No sessions available")
 
-	// Should return 422 if max attempts reached with unknown error
+	// Should return 503 if max attempts reached with an orchestrator error
 	oldAttempts := MaxAttempts
 	defer func() {
 		MaxAttempts = oldAttempts
@@ -136,12 +136,12 @@ func TestPush_ShouldReturn422ForNonRetryable(t *testing.T) {
 	s.HandlePush(w, req)
 	resp = w.Result()
 	defer resp.Body.Close()
-	assert.Equal(422, resp.StatusCode)
+	assert.Equal(503, resp.StatusCode)
 	body, err = ioutil.ReadAll(resp.Body)
 	assert.NoError(err)
 	assert.Contains(string(body), "unknown error (test)")
 
-	// Should return 422 if error is non-retryable due to bad input
+	// A non-retryable error from one orchestrator is scoped to it: 503, not 422
 	sess = StubBroadcastSession(ts.URL)
 	bsm = bsmWithSessList([]*BroadcastSession{sess})
 	cxn.sessManager = bsm
@@ -150,7 +150,26 @@ func TestPush_ShouldReturn422ForNonRetryable(t *testing.T) {
 	require.Nil(t, err)
 	w = httptest.NewRecorder()
 	reader = bytes.NewReader(d)
-	req = httptest.NewRequest("POST", "/live/mani/18.ts", reader)
+	req = httptest.NewRequest("POST", "/live/mani/19.ts", reader)
+	req.Header.Set("Accept", "multipart/mixed")
+	s.HandlePush(w, req)
+	resp = w.Result()
+	defer resp.Body.Close()
+	assert.Equal(503, resp.StatusCode)
+
+	// Should return 422 when two orchestrators reject the segment the same way
+	MaxAttempts = 3
+	ts2, mux2 := stubTLSServer()
+	defer ts2.Close()
+	mux2.HandleFunc("/segment", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(buf)
+	})
+	bsm = bsmWithSessListExt([]*BroadcastSession{StubBroadcastSession(ts.URL), StubBroadcastSession(ts2.URL)}, nil, true)
+	cxn.sessManager = bsm
+	w = httptest.NewRecorder()
+	reader = bytes.NewReader(d)
+	req = httptest.NewRequest("POST", "/live/mani/20.ts", reader)
 	req.Header.Set("Accept", "multipart/mixed")
 	s.HandlePush(w, req)
 	resp = w.Result()

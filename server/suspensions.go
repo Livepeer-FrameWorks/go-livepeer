@@ -26,6 +26,21 @@ func (s *suspender) suspend(orch string, penalty int) {
 	s.list[orch] += penalty
 }
 
+// unsuspend removes up to 'penalty' from an orchestrator's suspension
+func (s *suspender) unsuspend(orch string, penalty int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.list[orch] <= penalty {
+		delete(s.list, orch)
+		return
+	}
+	s.list[orch] -= penalty
+}
+
+// sharedSuspended is always false: in-memory suspensions belong to one stream,
+// whose pool already removed the suspended orchestrator.
+func (s *suspender) sharedSuspended(orch string) bool { return false }
+
 // Suspended returns a non-zero value if the orchestrator is suspended
 // 'orch' is the service URI of the orchestrator
 // The value returned is the suspension penalty associated with the orchestrator whereby lower is better

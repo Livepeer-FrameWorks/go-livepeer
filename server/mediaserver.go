@@ -1100,18 +1100,19 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	// Do the transcoding! Deduplicated by sequence number plus a fingerprint of
 	// the media and processing controls. Exact retries join the in-flight
 	// transcode or return the cached result; conflicting reuse is rejected.
-	urls, err := cxn.processSegmentDeduped(ctx, seg, &segPar)
+	var requestDeadlineMs int
+	if ingestConfig != nil {
+		requestDeadlineMs = ingestConfig.DeadlineMs
+	}
+	budget := resolveSegmentBudget(cxn.params, requestDeadlineMs, seg.Duration, start)
+	urls, err := cxn.processSegmentDeduped(ctx, seg, &segPar, budget)
 	if err != nil {
 		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {
 			clog.Errorf(ctx, "No sessions available name=%s url=%s err=%q statusCode=%d", fname, r.URL, err, http.StatusServiceUnavailable)
 			http.Error(w, "No sessions available", http.StatusServiceUnavailable)
 			return
 		}
-		status := http.StatusInternalServerError
-		if isNonRetryableError(err) {
-			status = http.StatusUnprocessableEntity
-		}
-		errorOut(status, "http push error processing segment url=%s manifestID=%s err=%q", r.URL, mid, err)
+		errorOut(pushErrorStatus(err), "http push error processing segment url=%s manifestID=%s err=%q", r.URL, mid, err)
 		return
 	}
 	select {
@@ -1752,6 +1753,21 @@ func (s *LivepeerServer) LatestPlaylist() core.PlaylistManager {
 		return nil
 	}
 	return cxn.pl
+}
+
+// pushErrorStatus maps a segment processing error to the HTTP push status. 422
+// is reserved for a segment that is itself at fault; orchestrator failures and
+// an exhausted segment budget are 503 so the edge retries or falls back.
+func pushErrorStatus(err error) int {
+	switch {
+	case isBadInputError(err):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, errSegmentBudgetExhausted), errors.Is(err, maxTranscodeAttempts),
+		errors.Is(err, errNoOrchs), errors.Is(err, errDiscovery):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func shouldStopStream(err error) bool {
