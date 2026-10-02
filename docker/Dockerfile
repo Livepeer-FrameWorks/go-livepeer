@@ -14,10 +14,10 @@ ENV	GOARCH="$TARGETARCH" \
 RUN	apt update \
 	&& apt install -yqq ca-certificates curl lsb-release \
 	&& install -d -m 0755 /usr/share/keyrings \
-	&& curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 15 https://dl.google.com/go/go1.27.0.linux-${BUILDARCH}.tar.gz | tar -C /usr/local -xz \
-	&& curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 15 -o /usr/share/keyrings/docker.asc https://download.docker.com/linux/ubuntu/gpg \
+	&& curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 https://dl.google.com/go/go1.27.0.linux-${BUILDARCH}.tar.gz | tar -C /usr/local -xz \
+	&& curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 -o /usr/share/keyrings/docker.asc https://download.docker.com/linux/ubuntu/gpg \
 	&& printf '%s\n' "deb [arch=${BUILDARCH} signed-by=/usr/share/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list \
-	&& curl -fsSL --retry 5 --retry-delay 2 --connect-timeout 15 -o /usr/share/keyrings/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+	&& curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 -o /usr/share/keyrings/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
 	&& printf '%s\n' "deb [arch=${BUILDARCH} signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-14 main" > /etc/apt/sources.list.d/llvm-toolchain-14.list \
 	&& apt update \
 	&& apt -yqq install clang-14 clang-tools-14 lld-14 build-essential pkg-config autoconf git python python3-pip docker-ce-cli pciutils gcc-multilib libgcc-8-dev-arm64-cross libstdc++-8-dev-arm64-cross gcc-mingw-w64-x86-64 zlib1g zlib1g-dev libx264-dev libfdk-aac-dev cmake ninja-build \
@@ -28,12 +28,12 @@ RUN	update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 3
 	&& update-alternatives --install /usr/bin/ld ld /usr/bin/lld-14 30
 
 RUN	GRPC_HEALTH_PROBE_VERSION=v0.3.6 \
-	&& curl -fsSL https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH} -o /usr/bin/grpc_health_probe \
+	&& curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH} -o /usr/bin/grpc_health_probe \
 	&& chmod +x /usr/bin/grpc_health_probe \
 	&& ldconfig /usr/local/lib
 
 # nasm needed for ffmpeg
-RUN curl -o /nasm-3.01.tar.gz "https://www.nasm.us/pub/nasm/releasebuilds/3.01/nasm-3.01.tar.gz" \
+RUN curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 -o /nasm-3.01.tar.gz "https://www.nasm.us/pub/nasm/releasebuilds/3.01/nasm-3.01.tar.gz" \
 	&& echo "aea120d4adb0241f08ae24d6add09e4a993bc1c4d9f754dbfc8020d6916c9be1 nasm-3.01.tar.gz" > /nasm-3.01.tar.gz.sha256 \
 	&& sha256sum -c /nasm-3.01.tar.gz.sha256 \
 	&& tar xf /nasm-3.01.tar.gz \
@@ -55,7 +55,7 @@ ENV	GOPATH=/go \
 WORKDIR	/src
 
 RUN	mkdir -p /go \
-	&& curl -fsSLO https://github.com/livepeer/livepeer-ml/releases/download/v0.3/tasmodel.pb
+	&& curl -fsSLO --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 https://github.com/livepeer/livepeer-ml/releases/download/v0.3/tasmodel.pb
 
 COPY	./install_ffmpeg.sh	./install_ffmpeg.sh
 
