@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/livepeer/go-livepeer/core"
+	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/lpms/ffmpeg"
 	"github.com/livepeer/lpms/stream"
 	"github.com/stretchr/testify/assert"
@@ -104,6 +105,29 @@ func TestProcessSegment_NoOrchestratorWaitsOutBudget(t *testing.T) {
 	assert.ErrorIs(t, err, errNoOrchs)
 	assert.Equal(t, 503, pushErrorStatus(err))
 	assert.GreaterOrEqual(t, time.Since(start), budget.total-50*time.Millisecond)
+}
+
+// An offchain gateway has no payment sender; dropping a failed orchestrator
+// must not dereference it.
+func TestNewSessionManager_OffchainRemoveSessionWithoutSender(t *testing.T) {
+	n, _ := core.NewLivepeerNode(nil, "", nil)
+	require.Nil(t, n.Sender)
+	mid := core.RandomManifestID()
+	bsm := NewSessionManager(context.TODO(), n, &core.StreamParameters{ManifestID: mid, OS: drivers.NewMemoryDriver(nil).NewSession(string(mid))})
+	sess := StubBroadcastSession("https://orch")
+	bsm.trustedPool.sessMap[sess.Transcoder()] = sess
+	assert.NotPanics(t, func() { bsm.suspendAndRemoveOrch(sess) })
+}
+
+// A panic while processing a segment fails that segment instead of the
+// gateway process.
+func TestProcessSegmentDeduped_RecoversPanic(t *testing.T) {
+	cxn := budgetTestConnection(bsmWithSessListExt(nil, nil, true))
+	cxn.pl = nil // processSegment dereferences the playlist
+	seg := &stream.HLSSegment{Data: []byte("dummy"), SeqNo: 9, Duration: 2.0}
+	_, err := cxn.processSegmentDeduped(context.Background(), seg, &core.SegmentParameters{}, resolveSegmentBudget(cxn.params, 0, seg.Duration, time.Now()))
+	assert.ErrorIs(t, err, errSegmentPanic)
+	assert.Equal(t, 500, pushErrorStatus(err))
 }
 
 // A re-POST of a segment joins the transcode started by an earlier request even

@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -24,6 +26,9 @@ var errSeqPayloadConflict = errors.New("segment sequence reused with a different
 // of the bounded replay window. Reprocessing it would turn an old retry into a
 // fresh paid transcode.
 var errSeqOutsideReplayWindow = errors.New("segment sequence is outside the replay window")
+
+// errSegmentPanic is returned when processing a segment panicked.
+var errSegmentPanic = errors.New("segment processing panicked")
 
 // segCacheMax bounds the per-connection completed-segment cache. Segment
 // sequence numbers are monotonic, so first-in-first-out eviction keeps the most
@@ -186,7 +191,15 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 		return urls, nil
 	}
 	key := strconv.FormatUint(seg.SeqNo, 10) + ":" + hex.EncodeToString(hash[:])
-	resc := cxn.segDedup.DoChan(key, func() (interface{}, error) {
+	resc := cxn.segDedup.DoChan(key, func() (_ interface{}, err error) {
+		// DoChan runs this on its own goroutine, where an unrecovered panic
+		// would take down the whole gateway rather than one request.
+		defer func() {
+			if p := recover(); p != nil {
+				clog.Errorf(ctx, "Recovered panic processing segment seqNo=%d panic=%v\n%s", seg.SeqNo, p, debug.Stack())
+				err = fmt.Errorf("%w: %v", errSegmentPanic, p)
+			}
+		}()
 		if urls, ok := cxn.cachedSegURLs(seg.SeqNo, hash); ok {
 			return urls, nil
 		}

@@ -650,7 +650,10 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 	susTrusted := healthStore.scoped(params.Workload, capKey)
 	susUntrusted := healthStore.scoped(params.Workload, capKey)
 	cleanupSession := func(sessionID string) {
-		node.Sender.CleanupSession(sessionID)
+		// Offchain gateways have no payment sender.
+		if node.Sender != nil {
+			node.Sender.CleanupSession(sessionID)
+		}
 	}
 	createSessionsTrusted := func() ([]*BroadcastSession, error) {
 		return selectOrchestrator(ctx, node, params, trustedNumOrchs, susTrusted, common.ScoreAtLeast(common.Score_Trusted), cleanupSession)
