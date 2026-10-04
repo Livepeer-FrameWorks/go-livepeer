@@ -94,8 +94,10 @@ func (orch *orchestrator) CheckCapacity(mid ManifestID) error {
 	if _, ok := orch.node.SegmentChans[mid]; ok {
 		return nil
 	}
-	// Dynamic capacity check (if enabled) runs before static MaxSessions backstop
-	if orch.node.CapacityMgr != nil {
+	// Dynamic capacity check (if enabled) runs before static MaxSessions backstop.
+	// It protects the sessions this orchestrator already runs, so with none of
+	// its own there is nothing to protect and load from other work never refuses.
+	if orch.node.CapacityMgr != nil && len(orch.node.SegmentChans) > 0 {
 		if err := orch.node.CapacityMgr.CheckCapacity(); err != nil {
 			return err
 		}

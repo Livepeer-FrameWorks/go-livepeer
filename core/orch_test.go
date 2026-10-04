@@ -747,6 +747,27 @@ func TestOrchCheckCapacity(t *testing.T) {
 	assert.Nil(o.CheckCapacity(mid))
 }
 
+func TestOrchCheckCapacity_LoadRefusesOnlyWithOwnSessions(t *testing.T) {
+	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
+	n, _ := NewLivepeerNode(nil, "", nil)
+	defer func(prev int) { MaxSessions = prev }(MaxSessions)
+	MaxSessions = 10
+	busy := newMockMonitor()
+	busy.encoderUtil = 0.95
+	n.CapacityMgr = NewCapacityManager([]string{"cpu"}, ffmpeg.Software, 0, 0, func(string) HWMonitor { return busy })
+	o := NewOrchestrator(n, nil)
+	md := StubSegTranscodingMetadata()
+
+	// Other work keeps the host busy, but this orchestrator runs nothing.
+	assert.Nil(t, o.CheckCapacity(ManifestID("new-stream")))
+
+	// With a session of its own the load protects that session.
+	_, err := n.getSegmentChan(context.TODO(), md)
+	require.NoError(t, err)
+	assert.Equal(t, ErrOrchCap, o.CheckCapacity(ManifestID("new-stream")))
+	assert.Nil(t, o.CheckCapacity(ManifestID(md.AuthToken.SessionId)), "an existing session is never refused")
+}
+
 func TestProcessPayment_GivenRecipientError_ReturnsNil(t *testing.T) {
 	addr := defaultRecipient
 	dbh, dbraw := tempDBWithOrch(t, &common.DBOrch{

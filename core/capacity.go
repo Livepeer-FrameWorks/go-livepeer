@@ -25,9 +25,27 @@ type HWMonitor interface {
 
 // DeviceState tracks per-device capacity measurements.
 type DeviceState struct {
-	realtimeEMA  float64 // EMA of (transcode_duration / segment_duration); 1.0 = realtime
-	sampleCount  int     // number of samples in EMA
-	lastDecision bool    // hysteresis: true=last decision was accept
+	realtimeEMA  float64   // EMA of (transcode_duration / segment_duration); 1.0 = realtime
+	sampleCount  int       // number of samples in EMA
+	lastSample   time.Time // when the last sample was recorded
+	lastDecision bool      // hysteresis: true=last decision was accept
+}
+
+// realtimeEMAStaleness bounds how long the realtime ratio describes a device.
+// Samples only arrive while the device transcodes, so an idle device would
+// otherwise keep its last ratio forever and a slow final segment would refuse
+// all new work indefinitely.
+const realtimeEMAStaleness = 30 * time.Second
+
+// capacityNow is the clock the realtime ratio ages by.
+var capacityNow = time.Now
+
+// ema returns the device's realtime ratio, or 0 once its last sample is stale.
+func (s *DeviceState) ema(now time.Time) float64 {
+	if s.sampleCount == 0 || now.Sub(s.lastSample) >= realtimeEMAStaleness {
+		return 0
+	}
+	return s.realtimeEMA
 }
 
 // CapacityManager makes dynamic accept/reject decisions based on hardware
@@ -120,6 +138,7 @@ func (cm *CapacityManager) CheckCapacity() error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	now := capacityNow()
 	for deviceID, state := range cm.devices {
 		mon := cm.monitors[deviceID]
 
@@ -138,7 +157,7 @@ func (cm *CapacityManager) CheckCapacity() error {
 		hwUtil := math.Max(encUtil, decUtil)
 
 		// Signal 2: Realtime ratio EMA — "are we keeping up with realtime?"
-		emaUtil := state.realtimeEMA
+		emaUtil := state.ema(now)
 
 		// Worst of all signals
 		worst := math.Max(hwUtil, emaUtil)
@@ -196,12 +215,17 @@ func (cm *CapacityManager) RecordResult(deviceID string, transcodeDuration, segm
 		return
 	}
 
-	if state.sampleCount == 0 {
+	// A stale ratio describes earlier work, so the first sample after an idle
+	// period starts the average afresh.
+	now := capacityNow()
+	if state.sampleCount == 0 || now.Sub(state.lastSample) >= realtimeEMAStaleness {
 		state.realtimeEMA = ratio
+		state.sampleCount = 0
 	} else {
 		state.realtimeEMA = (1-emaAlpha)*state.realtimeEMA + emaAlpha*ratio
 	}
 	state.sampleCount++
+	state.lastSample = now
 }
 
 // Utilization returns the utilization of the least-loaded device (0.0-1.0).
@@ -216,6 +240,7 @@ func (cm *CapacityManager) Utilization() float64 {
 
 	// Report the utilization of the least-loaded device (since that's what a new session would use)
 	minUtil := 1.0
+	now := capacityNow()
 	for deviceID, state := range cm.devices {
 		mon := cm.monitors[deviceID]
 		encUtil, decUtil := mon.EncoderUtil(), mon.DecoderUtil()
@@ -223,7 +248,7 @@ func (cm *CapacityManager) Utilization() float64 {
 			continue
 		}
 		hwUtil := math.Max(encUtil, decUtil)
-		worst := math.Max(hwUtil, state.realtimeEMA)
+		worst := math.Max(hwUtil, state.ema(now))
 		if worst < minUtil {
 			minUtil = worst
 		}
@@ -277,7 +302,7 @@ func (cm *CapacityManager) DeviceUtilization(deviceID string) float64 {
 	}
 	mon := cm.monitors[deviceID]
 	hwUtil := math.Max(mon.EncoderUtil(), mon.DecoderUtil())
-	return math.Max(hwUtil, state.realtimeEMA)
+	return math.Max(hwUtil, state.ema(capacityNow()))
 }
 
 // StubMonitor returns permissive defaults — effectively disables hardware monitoring

@@ -69,6 +69,28 @@ func TestCapacityManager_RejectWhenEMAOverloaded(t *testing.T) {
 	assert.Equal(t, ErrOrchCap, err, "should reject when EMA > rejectThresh")
 }
 
+func TestCapacityManager_StaleRealtimeRatioStopsRefusing(t *testing.T) {
+	now := time.Unix(1000, 0)
+	capacityNow = func() time.Time { return now }
+	defer func() { capacityNow = time.Now }()
+	cm := NewCapacityManager([]string{"0"}, ffmpeg.Nvidia, 0, 0, func(device string) HWMonitor {
+		return newMockMonitor()
+	})
+
+	// The last segments of the last session ran slow; then the device idles.
+	cm.RecordResult("0", 950*time.Millisecond, 1000*time.Millisecond)
+	assert.Equal(t, ErrOrchCap, cm.CheckCapacity())
+
+	now = now.Add(realtimeEMAStaleness)
+	assert.NoError(t, cm.CheckCapacity(), "an idle device must not refuse on its last session's ratio")
+	assert.Zero(t, cm.Utilization())
+	assert.Zero(t, cm.DeviceUtilization("0"))
+
+	// The first sample after the idle period starts the average afresh.
+	cm.RecordResult("0", 200*time.Millisecond, 1000*time.Millisecond)
+	assert.InDelta(t, 0.2, cm.DeviceUtilization("0"), 1e-9)
+}
+
 func TestCapacityManager_AcceptBelowThreshold(t *testing.T) {
 	mon := newMockMonitor()
 	mon.encoderUtil = 0.50
