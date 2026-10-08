@@ -457,13 +457,14 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		frameworks.SetRemoteIP(ctx, remoteIPOnly(info.Conn.RemoteAddr().String()))
 	}})
 	submitStart := time.Now()
+	accountingFW := &fwpb.OrchestratorAttemptAccounting{Version: 1}
 	var (
 		uploadDurFW    time.Duration
 		transcodeDurFW time.Duration
 		pixelCountFW   int64
 	)
 	defer func() {
-		emitFrameworksTranscodeOutcome(ctx, sess, seg, submitStart, uploadDurFW, transcodeDurFW, pixelCountFW, result, retErr)
+		emitFrameworksTranscodeOutcome(ctx, sess, seg, submitStart, uploadDurFW, transcodeDurFW, pixelCountFW, accountingFW, result, retErr)
 		if result != nil {
 			result.RemoteIP = frameworks.RemoteIP(ctx)
 		}
@@ -583,6 +584,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	clog.Infof(ctx, "Submitting segment bytes=%v orch=%s timeout=%s uploadTimeout=%s segDur=%v",
 		len(data), ti.Transcoder, httpTimeout, uploadTimeout, seg.Duration)
 	start := time.Now()
+	accountingFW.RequestDispatched = true
 	resp, err := sendReqWithTimeout(req, uploadTimeout)
 	uploadDur := time.Since(start)
 	uploadDurFW = uploadDur
@@ -598,6 +600,10 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	// If the segment was submitted then we assume that any payment included was
 	// submitted as well so we consider the update's credit as spent
 	balUpdate.Status = CreditSpent
+	accountingFW.TicketCreditSent = frameworksAccountingAmount(balUpdate.NewCredit)
+	if balUpdate.NumTickets > 0 {
+		accountingFW.TicketsSent = uint64(balUpdate.NumTickets)
+	}
 	if monitor.Enabled {
 		monitor.TicketValueSent(ctx, balUpdate.NewCredit)
 		monitor.TicketsSent(ctx, balUpdate.NumTickets)
@@ -687,12 +693,18 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	for _, res := range tdata.Segments {
 		pixelCount += res.Pixels
 	}
-	pixelCountFW = pixelCount
+	if checked, known := frameworksReturnedPixels(tdata); known {
+		pixelCountFW = int64(checked)
+		accountingFW.ReturnedPixelsKnown = true
+	}
 
 	if priceInfo != nil {
 		// The update's debit is the transcoding fee which is computed as the total number of pixels processed
 		// for all results returned multiplied by the orchestrator's price
 		balUpdate.Debit.Mul(new(big.Rat).SetInt64(pixelCount), priceInfo)
+		if accountingFW.ReturnedPixelsKnown {
+			accountingFW.ServiceCharge = frameworksAccountingAmount(balUpdate.Debit)
+		}
 
 		if monitor.Enabled {
 			monitor.MilPixelsProcessed(ctx, float64(pixelCount)/1000000.0)
@@ -984,7 +996,7 @@ func sendReqWithTimeout(req *http.Request, timeout time.Duration) (*http.Respons
 // emitFrameworksTranscodeOutcome sends the transcode row captured by
 // SubmitSegment's return-boundary defer. Early returns leave unavailable
 // timing fields at zero.
-func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, start time.Time, uploadDur, transcodeDur time.Duration, pixelCount int64, result *ReceivedTranscodeResult, err error) {
+func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, start time.Time, uploadDur, transcodeDur time.Duration, pixelCount int64, accounting *fwpb.OrchestratorAttemptAccounting, result *ReceivedTranscodeResult, err error) {
 	if !frameworks.Enabled() || sess == nil {
 		return
 	}
@@ -1026,6 +1038,7 @@ func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession,
 		TranscodeMs:             uint32(transcodeDur.Milliseconds()),
 		OverallMs:               overall,
 		Pixels:                  uint64(pixelCount),
+		Accounting:              accounting,
 		Profiles:                profiles,
 	}
 	if result != nil {

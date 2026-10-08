@@ -108,6 +108,14 @@ func Init(ctx context.Context) error {
 		return fmt.Errorf("frameworks telemetry: Decklog client init failed: %w", err)
 	}
 	client = c
+	if addr != "" {
+		go func() {
+			<-ctx.Done()
+			if err := c.Close(); err != nil {
+				glog.Warningf("frameworks telemetry shutdown: %v", err)
+			}
+		}()
+	}
 
 	// GeoIP is best-effort metadata; telemetry still emits without it.
 	if mmdbPath := strings.TrimSpace(os.Getenv("GEOIP_MMDB_PATH")); mmdbPath != "" {

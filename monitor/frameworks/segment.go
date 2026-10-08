@@ -8,11 +8,13 @@ import (
 
 type segmentKey struct{}
 type SegmentObservation struct {
-	mu               sync.Mutex
-	Address, URI, IP string
-	Attempts         uint32
-	Setup            time.Duration
-	URIs             map[string]bool
+	mu                 sync.Mutex
+	Address, URI, IP   string
+	Attempts           uint32
+	Setup              time.Duration
+	URIs               map[string]bool
+	AcceptedPixels     uint64
+	AcceptedRenditions uint32
 }
 
 func WithSegment(ctx context.Context) context.Context {
@@ -22,8 +24,26 @@ func BeginSegmentAttempt(ctx context.Context) {
 	if s, _ := ctx.Value(segmentKey{}).(*SegmentObservation); s != nil {
 		s.mu.Lock()
 		s.Address, s.URI, s.IP = "", "", ""
+		s.AcceptedPixels, s.AcceptedRenditions = 0, 0
 		s.mu.Unlock()
 	}
+}
+
+func SelectedSegmentWork(ctx context.Context, pixels uint64, renditions uint32) {
+	if s, _ := ctx.Value(segmentKey{}).(*SegmentObservation); s != nil {
+		s.mu.Lock()
+		s.AcceptedPixels, s.AcceptedRenditions = pixels, renditions
+		s.mu.Unlock()
+	}
+}
+
+func SegmentWorkSnapshot(ctx context.Context) (pixels uint64, renditions uint32) {
+	if s, _ := ctx.Value(segmentKey{}).(*SegmentObservation); s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.AcceptedPixels, s.AcceptedRenditions
+	}
+	return
 }
 func SegmentSubmitted(ctx context.Context, uri string) {
 	if s, _ := ctx.Value(segmentKey{}).(*SegmentObservation); s != nil {

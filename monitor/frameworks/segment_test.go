@@ -27,3 +27,17 @@ func TestFinalSegmentUsesSelectedResponseAndCountsHedges(t *testing.T) {
 		t.Fatal("retry retained previous attempt attribution or lost replacement timing")
 	}
 }
+
+func TestFinalWorkDoesNotSurviveFailedDownloadRetry(t *testing.T) {
+	ctx := WithSegment(context.Background())
+	SelectedSegmentWork(ctx, 900, 3)
+	pixels, renditions := SegmentWorkSnapshot(ctx)
+	if pixels != 900 || renditions != 3 {
+		t.Fatal("accepted work not captured")
+	}
+	BeginSegmentAttempt(ctx)
+	pixels, renditions = SegmentWorkSnapshot(ctx)
+	if pixels != 0 || renditions != 0 {
+		t.Fatal("retry retained discarded output work")
+	}
+}

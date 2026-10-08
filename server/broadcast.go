@@ -1266,6 +1266,10 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 	if frameworks.Enabled() && cxn.params != nil {
 		payload := &fwpb.OrchestratorSegmentResult{SessionId: cxn.params.SessionID, ManifestIdHash: hashManifest(string(mid)), SeqNo: uint64(seg.SeqNo), SourceDurationMs: uint32(seg.Duration * 1000), OverallMs: uint32(time.Since(startTime).Milliseconds()), Attempts: uint32(len(attempts)), Success: err == nil && len(urls) > 0, DeadlineExceeded: errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, errSegmentBudgetExhausted), DownstreamStatus: "unknown", Profiles: profileNames(cxn.params.Profiles)}
 		payload.DeliverySessionId = string(mid)
+		payload.WorkAccountingVersion = 1
+		if payload.Success {
+			payload.AcceptedPixels, payload.AcceptedRenditions = frameworks.SegmentWorkSnapshot(ctx)
+		}
 		seen := map[string]bool{}
 		for _, attempt := range attempts {
 			if attempt.Orchestrator.TranscoderUri != "" {
@@ -1374,6 +1378,9 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	}
 	urls, err = downloadResults(ctx, cxn, segUsed, sess, res)
 	frameworks.SelectedSegmentResult(ctx, sess.Address(), sess.Transcoder(), res.RemoteIP)
+	if pixels, known := frameworksReturnedPixels(res.TranscodeData); err == nil && known {
+		frameworks.SelectedSegmentWork(ctx, pixels, uint32(len(res.TranscodeData.Segments)))
+	}
 	if err == nil {
 		cxn.sessManager.recordRoundTrip(ctx, sess, seg, roundTrip)
 	}

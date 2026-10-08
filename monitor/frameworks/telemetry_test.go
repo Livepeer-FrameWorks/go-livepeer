@@ -4,11 +4,32 @@ import (
 	"context"
 	pb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
 	"github.com/Livepeer-FrameWorks/monorepo/pkg/telemetryspool"
+	"go.uber.org/goleak"
 	"google.golang.org/protobuf/proto"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestTelemetryCancellationClosesDecklogConnection(t *testing.T) {
+	before := goleak.IgnoreCurrent()
+	t.Setenv("FRAMEWORKS_DECKLOG_GRPC_ADDR", "127.0.0.1:1")
+	t.Setenv("FRAMEWORKS_DECKLOG_TLS_MODE", "insecure")
+	t.Setenv("FRAMEWORKS_GATEWAY_ID", "shutdown-test")
+	t.Setenv("FRAMEWORKS_CLUSTER_ID", "test-cluster")
+	t.Setenv("FRAMEWORKS_CLUSTER_OWNER_TENANT_ID", "11111111-1111-4111-8111-111111111111")
+	t.Setenv("FRAMEWORKS_TELEMETRY_SPOOL_DIR", t.TempDir())
+	t.Setenv("FRAMEWORKS_NETWORK_OBSERVER_URL", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	require.NoError(t, Init(ctx))
+	t.Cleanup(func() {
+		t.Setenv("FRAMEWORKS_DECKLOG_GRPC_ADDR", "")
+		require.NoError(t, Init(context.Background()))
+	})
+	cancel()
+	require.Eventually(t, func() bool { return goleak.Find(before) == nil }, time.Second, 10*time.Millisecond)
+}
 
 func TestAIOutcomeKeepsItsExistingIngestWriter(t *testing.T) {
 	q, err := telemetryspool.Open(telemetryspool.Config{Directory: t.TempDir()})
