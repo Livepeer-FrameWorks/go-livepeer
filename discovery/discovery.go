@@ -22,6 +22,8 @@ import (
 	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/server"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
 )
@@ -496,6 +498,25 @@ func classifyDiscoveryError(err error) string {
 		return ""
 	}
 	msg := strings.ToLower(err.Error())
+	// Livepeer also returns these admission errors as gRPC Unknown.
+	switch {
+	case strings.Contains(msg, "insufficient sender reserve"):
+		return "observer_payment"
+	case strings.Contains(msg, "orchestrator req sig check failed"), strings.Contains(msg, "authentication failed"):
+		return "authentication"
+	case strings.Contains(msg, "orchestrator is at capacity"):
+		return "capacity"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return "authentication"
+	case codes.ResourceExhausted:
+		return "capacity"
+	case codes.Canceled:
+		return "canceled"
+	}
 	switch {
 	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"):
 		return "timeout"
