@@ -11,8 +11,13 @@ package frameworks
 import (
 	"context"
 	"fmt"
+	"github.com/Livepeer-FrameWorks/monorepo/pkg/telemetryspool"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,13 +43,16 @@ type gatewayCtx struct {
 }
 
 var (
-	mu       sync.RWMutex
-	enabled  bool
-	ctxIdent gatewayCtx
-	client   *decklog.BatchedClient
-	geoIP    *geoip.Reader
-	resolver = newDNSCache(60 * time.Second)
-	logger   logging.Logger
+	mu          sync.RWMutex
+	enabled     bool
+	ctxIdent    gatewayCtx
+	client      *decklog.BatchedClient
+	geoIP       *geoip.Reader
+	resolver    = newDNSCache(60 * time.Second)
+	logger      logging.Logger
+	spool       *telemetryspool.Queue
+	networkID   string
+	environment string
 )
 
 // Init wires the singleton from env. Safe to call once at gateway startup.
@@ -55,6 +63,9 @@ func Init(ctx context.Context) error {
 	defer mu.Unlock()
 
 	logger = logging.NewLogger()
+	if err := initCandidates(ctx); err != nil {
+		return err
+	}
 
 	ident := gatewayCtx{
 		gatewayID:            strings.TrimSpace(os.Getenv("FRAMEWORKS_GATEWAY_ID")),
@@ -63,6 +74,9 @@ func Init(ctx context.Context) error {
 		clusterOwnerTenantID: strings.TrimSpace(os.Getenv("FRAMEWORKS_CLUSTER_OWNER_TENANT_ID")),
 	}
 	addr := strings.TrimSpace(os.Getenv("FRAMEWORKS_DECKLOG_GRPC_ADDR"))
+	if addr != "" && (ident.gatewayID == "" || ident.clusterID == "") {
+		return fmt.Errorf("frameworks telemetry requires stable gateway and cluster IDs")
+	}
 	tlsMode := strings.TrimSpace(os.Getenv("FRAMEWORKS_DECKLOG_TLS_MODE"))
 	allowInsecure := true
 	if addr != "" {
@@ -110,6 +124,57 @@ func Init(ctx context.Context) error {
 	// Decklog requires cluster-owner tenancy on every gateway telemetry event.
 	enabled = addr != "" && ident.clusterOwnerTenantID != ""
 	if enabled {
+		directory := strings.TrimSpace(os.Getenv("FRAMEWORKS_TELEMETRY_SPOOL_DIR"))
+		if directory == "" {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				return fmt.Errorf("find persistent telemetry directory: %w", homeErr)
+			}
+			directory = filepath.Join(home, ".lpData", "frameworks-telemetry", ident.gatewayID)
+		}
+		maxBytes := int64(64 << 20)
+		if raw := os.Getenv("FRAMEWORKS_TELEMETRY_SPOOL_MAX_BYTES"); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value <= 0 {
+				return fmt.Errorf("invalid telemetry spool bound")
+			}
+			maxBytes = value
+		}
+		spool, err = telemetryspool.Open(telemetryspool.Config{Directory: directory, MaxBytes: maxBytes})
+		if err != nil {
+			return fmt.Errorf("open telemetry spool: %w", err)
+		}
+		networkID = os.Getenv("FRAMEWORKS_NETWORK_ID")
+		if networkID == "" {
+			networkID = "42161"
+		}
+		environment = os.Getenv("FRAMEWORKS_ENVIRONMENT")
+		if environment == "" {
+			environment = "production"
+		}
+		q := spool
+		go q.Run(ctx, func(ctx context.Context, raw []byte) error {
+			var event pb.GatewayTelemetryEvent
+			if err := proto.Unmarshal(raw, &event); err != nil {
+				return err
+			}
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			return c.SendGatewayTelemetryContext(sendCtx, &event)
+		}, func(err error) { glog.Warningf("frameworks telemetry delivery pending: %v", err) })
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+				count, _, dropped := q.Stats()
+				send(ctx, &pb.GatewayTelemetryEvent{Timestamp: timestamppb.Now(), GatewayId: ident.gatewayID, GatewayRegion: ident.gatewayRegion, ClusterId: ident.clusterID, ClusterOwnerTenantId: ident.clusterOwnerTenantID, Payload: &pb.GatewayTelemetryEvent_ObserverReport{ObserverReport: &pb.OrchestratorObserverReport{ReportKind: "heartbeat", CadenceSeconds: 60, QueueRecords: uint32(count), DroppedRecords: dropped, Healthy: true}}})
+			}
+		}()
 		glog.Infof("frameworks telemetry: enabled (gateway=%s region=%s cluster=%s)", ident.gatewayID, ident.gatewayRegion, ident.clusterID)
 	} else if addr != "" {
 		return fmt.Errorf("frameworks telemetry: FRAMEWORKS_CLUSTER_OWNER_TENANT_ID is required when FRAMEWORKS_DECKLOG_GRPC_ADDR is set")
@@ -134,22 +199,18 @@ func SetDialedIP(host, ip string) {
 	resolver.SetDialedIP(host, ip)
 }
 
-func ResolvedIPForURL(rawURL string) string {
+// ResolvedIPForURL cannot attribute a new request using a previous socket.
+func ResolvedIPForURL(rawURL string) string { return "" }
+
+func EmitFilterDecision(ctx context.Context, address, uri, stage, reason string) {
 	if !Enabled() {
-		return ""
+		return
 	}
-	host := hostFromURL(rawURL)
-	if host == "" {
-		return ""
-	}
-	return resolver.dialedOrSingleIP(host)
+	EmitDecision(ctx, &pb.OrchestratorCandidateDecision{OrchAddr: address, OrchUrl: uri, Stage: stage, Disposition: "rejected", Reason: reason, Workload: "transcoding", RuleVersion: "gateway-v1"})
 }
 
-// EmitDiscoveryObserved emits one row per resolved IP for a single
-// GetOrchestratorInfo attempt. The dialed IP carries actual latency +
-// reachability; sibling A-record IPs come along as observation context with
-// dialed=false, so the per-(gateway, orch_addr, resolved_ip) vantage view
-// is preserved end-to-end.
+// EmitDiscoveryObserved records the actual RPC socket. DNS answers belong to
+// independent observer discovery and cannot attribute an RPC to an instance.
 //
 // orchURL is the URL the gateway dialed (used for hostname resolution).
 // orchAddr is the orchestrator's eth address (hex). dialedLatency and
@@ -170,16 +231,12 @@ func EmitDiscoveryObserved(
 	if host == "" {
 		return
 	}
-	dialedIP := resolver.dialedIP(host)
-	resolvedIPs := resolver.lookup(host)
-	if len(resolvedIPs) == 0 {
-		// DNS failed; emit a single row with empty IP so the failure is durable.
-		resolvedIPs = []string{""}
-	}
+	dialedIP := RemoteIP(ctx)
+	resolvedIPs := []string{dialedIP}
 
 	now := time.Now()
 	for _, ip := range resolvedIPs {
-		isDialed := ip == dialedIP || (dialedIP == "" && len(resolvedIPs) == 1)
+		isDialed := dialedIP != "" && ip == dialedIP
 		evt := &pb.GatewayTelemetryEvent{
 			Timestamp:            timestamppb.New(now),
 			Payload:              nil, // set below
@@ -195,13 +252,18 @@ func EmitDiscoveryObserved(
 			DiscoveryLatencyMs: 0,
 			Reachable:          false,
 			Compatible:         compatible,
+			CompatibilityKnown: false,
+			SamplingSource:     "gateway",
+			ObserverHealthy:    true,
+			TargetIp:           TargetIP(ctx),
+			AttemptId:          uuid.NewString(),
 			Score:              score,
 			Vantage:            buildVantage(ip, isDialed, now),
 		}
-		if isDialed {
+		if isDialed || ip == "" {
 			obs.DiscoveryLatencyMs = uint32(dialedLatency.Milliseconds())
 			obs.Reachable = reachable
-			obs.FailureReason = failureReason
+			obs.FailureReason = failureKind
 			obs.FailureKind = failureKind
 		}
 		evt.Payload = &pb.GatewayTelemetryEvent_Discovery{Discovery: obs}
@@ -219,13 +281,9 @@ func EmitStateUpdate(ctx context.Context, orchAddr, orchURL string, info *pb.Orc
 	if !Enabled() || info == nil {
 		return
 	}
-	host := hostFromURL(orchURL)
-	dialedIP := ""
-	if host != "" {
-		dialedIP = resolver.dialedOrSingleIP(host)
-	}
+	dialedIP := RemoteIP(ctx)
 	now := time.Now()
-	info.Vantage = buildVantage(dialedIP, true, now)
+	info.Vantage = buildVantage(dialedIP, dialedIP != "", now)
 
 	send(ctx, &pb.GatewayTelemetryEvent{
 		Timestamp:            timestamppb.New(now),
@@ -280,20 +338,43 @@ func EmitAIOutcome(ctx context.Context, streamTenantID string, payload *pb.Orche
 	})
 }
 
-// send is the single fire-and-log path. Errors are logged at debug level;
-// data-plane processing should not block on telemetry.
+// send persists before the asynchronous network worker attempts delivery.
 func send(ctx context.Context, evt *pb.GatewayTelemetryEvent) {
 	mu.RLock()
-	c := client
+	q := spool
+	network, env := networkID, environment
 	mu.RUnlock()
-	if c == nil {
+	if q == nil {
 		return
 	}
-	if err := c.SendGatewayTelemetry(evt); err != nil {
-		// Use V(common.DEBUG) equivalent; these failures are noisy under
-		// transient network blips.
-		glog.V(2).Infof("frameworks telemetry: send failed: %v", err)
+	evt.EventId = uuid.NewString()
+	evt.SchemaVersion = 3
+	// AI outcomes use their separate writer; the network projection records transcoding.
+	if evt.GetAi() != nil {
+		evt.SchemaVersion = 2
 	}
+	evt.NetworkId = network
+	evt.Environment = env
+	evt.ProducerKind = "gateway"
+	raw, err := proto.Marshal(evt)
+	if err == nil {
+		err = q.Enqueue(evt.EventId, raw)
+	}
+	if err != nil {
+		glog.Warningf("frameworks telemetry spool enqueue failed: %v", err)
+	}
+}
+func EmitDecision(ctx context.Context, payload *pb.OrchestratorCandidateDecision) {
+	if !Enabled() {
+		return
+	}
+	send(ctx, &pb.GatewayTelemetryEvent{Timestamp: timestamppb.Now(), GatewayId: ctxIdent.gatewayID, GatewayRegion: ctxIdent.gatewayRegion, ClusterId: ctxIdent.clusterID, ClusterOwnerTenantId: ctxIdent.clusterOwnerTenantID, Payload: &pb.GatewayTelemetryEvent_Decision{Decision: payload}})
+}
+func EmitSegmentResult(ctx context.Context, tenantID string, payload *pb.OrchestratorSegmentResult) {
+	if !Enabled() || tenantID == "" {
+		return
+	}
+	send(ctx, &pb.GatewayTelemetryEvent{Timestamp: timestamppb.Now(), GatewayId: ctxIdent.gatewayID, GatewayRegion: ctxIdent.gatewayRegion, ClusterId: ctxIdent.clusterID, ClusterOwnerTenantId: ctxIdent.clusterOwnerTenantID, StreamTenantId: tenantID, Payload: &pb.GatewayTelemetryEvent_SegmentResult{SegmentResult: payload}})
 }
 
 func buildVantage(resolvedIP string, dialed bool, now time.Time) *pb.OrchestratorVantageGeo {

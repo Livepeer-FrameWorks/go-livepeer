@@ -181,6 +181,7 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 	var getOrchInfo func(ctx context.Context, od common.OrchestratorDescriptor, level int, infoCh chan common.OrchestratorDescriptor, errCh chan error, allOrchInfoCh chan common.OrchestratorDescriptor)
 
 	getOrchInfo = func(ctx context.Context, od common.OrchestratorDescriptor, level int, infoCh chan common.OrchestratorDescriptor, errCh chan error, allOrchInfoCh chan common.OrchestratorDescriptor) {
+		ctx = frameworks.WithAttempt(ctx, od.LocalInfo.TargetIP)
 		start := time.Now()
 		info, err := o.getOrchInfo(ctx, o.bcast, od.LocalInfo.URL, server.GetOrchestratorInfoParams{
 			Caps:                caps.ToNetCapabilities(),
@@ -201,9 +202,10 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 		}
 		orchDescr := common.OrchestratorDescriptor{
 			LocalInfo: &common.OrchestratorLocalInfo{
-				URL:     od.LocalInfo.URL,
-				Score:   od.LocalInfo.Score,
-				Latency: &latency,
+				URL:      od.LocalInfo.URL,
+				Score:    od.LocalInfo.Score,
+				Latency:  &latency,
+				TargetIP: od.LocalInfo.TargetIP,
 			},
 			RemoteInfo: info,
 		}
@@ -239,7 +241,31 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 			}
 		}
 
-		if err == nil && !isBlacklisted(info) && isCompatible(info) && doingWork {
+		blacklisted := info != nil && isBlacklisted(info)
+		compatible := err == nil && info != nil && !blacklisted && isCompatible(info)
+		if frameworks.Enabled() {
+			reason := "admitted"
+			disposition := "accepted"
+			if err != nil {
+				reason = classifyDiscoveryError(err)
+				disposition = "rejected"
+			} else if !doingWork {
+				reason = "no_transcoder"
+				disposition = "rejected"
+			} else if blacklisted {
+				reason = "blacklisted"
+				disposition = "rejected"
+			} else if !compatible {
+				reason = "incompatible"
+				disposition = "rejected"
+			}
+			address := ""
+			if info != nil {
+				address = hexutil.Encode(info.Address)
+			}
+			frameworks.EmitDecision(ctx, &fwpb.OrchestratorCandidateDecision{OrchAddr: address, OrchUrl: od.LocalInfo.URL.String(), ResolvedIp: frameworks.RemoteIP(ctx), Stage: "admission", Disposition: disposition, Reason: reason, Workload: "transcoding", ElapsedMs: uint32(latency.Milliseconds()), RuleVersion: "gateway-v1"})
+		}
+		if err == nil && !blacklisted && compatible && doingWork {
 			infoCh <- orchDescr
 			return
 		}
@@ -424,7 +450,7 @@ func emitFrameworksDiscovery(ctx context.Context, od common.OrchestratorDescript
 		"", // advertisedNodeURL: filled at the top-level loop, not per-attempt
 		latency,
 		reachable,
-		true, // compatibility is decided downstream of getOrchInfo; default true here, the failure-on-incompat path doesn't reach this site
+		false, // Eligibility is recorded separately after the gateway policy checks.
 		od.LocalInfo.Score,
 		failureReason,
 		failureKind,
@@ -448,6 +474,9 @@ func emitFrameworksDiscovery(ctx context.Context, od common.OrchestratorDescript
 		if info.PriceInfo != nil {
 			state.PricePerUnit = info.PriceInfo.PricePerUnit
 			state.PixelsPerUnit = info.PriceInfo.PixelsPerUnit
+			state.PriceKnown = info.PriceInfo.PixelsPerUnit > 0
+			state.PriceCurrency = "wei"
+			state.PriceUnit = "pixel"
 		}
 		if len(info.CapabilitiesPrices) > 0 {
 			state.CapabilityPriceEntries = capabilityPriceEntries(info.CapabilitiesPrices)

@@ -177,3 +177,13 @@ box-supabase:
 .PHONY: box-frontend
 box-frontend:
 	./box/frontend.sh
+
+.PHONY: test-frameworks
+test-frameworks:
+	go test ./monitor/frameworks $(GO_TEST_FLAGS)
+
+.PHONY: test-observability fmt-observability
+test-observability:
+	go test ./discovery ./server ./monitor/frameworks $(GO_TEST_FLAGS)
+fmt-observability:
+	gofmt -w monitor/frameworks/*.go discovery/discovery.go discovery/db_discovery.go common/types.go server/broadcast.go server/rpc.go server/segment_rpc.go

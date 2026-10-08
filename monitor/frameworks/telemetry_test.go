@@ -1,10 +1,32 @@
 package frameworks
 
 import (
+	"context"
+	pb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
+	"github.com/Livepeer-FrameWorks/monorepo/pkg/telemetryspool"
+	"google.golang.org/protobuf/proto"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAIOutcomeKeepsItsExistingIngestWriter(t *testing.T) {
+	q, err := telemetryspool.Open(telemetryspool.Config{Directory: t.TempDir()})
+	require.NoError(t, err)
+	mu.Lock()
+	oldSpool := spool
+	spool = q
+	mu.Unlock()
+	t.Cleanup(func() { mu.Lock(); spool = oldSpool; mu.Unlock() })
+	send(context.Background(), &pb.GatewayTelemetryEvent{Payload: &pb.GatewayTelemetryEvent_Ai{Ai: &pb.OrchestratorAIOutcome{Success: true}}})
+	rows, err := q.Pending(1)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var event pb.GatewayTelemetryEvent
+	require.NoError(t, proto.Unmarshal(rows[0].Payload, &event))
+	require.Equal(t, int32(2), event.SchemaVersion, "the separate AI writer must receive this event instead of the transcode-only v3 projection")
+	require.NotEmpty(t, event.EventId)
+}
 
 func TestHostFromURL(t *testing.T) {
 	tests := map[string]string{

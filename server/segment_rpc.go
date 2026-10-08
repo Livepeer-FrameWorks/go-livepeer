@@ -11,6 +11,7 @@ import (
 	"math/big"
 	gonet "net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -451,6 +452,10 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 
 	// Emit once from the return boundary so success and failure paths use the
 	// same instance key and timing fields.
+	ctx = frameworks.WithAttempt(ctx, "")
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+		frameworks.SetRemoteIP(ctx, remoteIPOnly(info.Conn.RemoteAddr().String()))
+	}})
 	submitStart := time.Now()
 	var (
 		uploadDurFW    time.Duration
@@ -459,6 +464,9 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	)
 	defer func() {
 		emitFrameworksTranscodeOutcome(ctx, sess, seg, submitStart, uploadDurFW, transcodeDurFW, pixelCountFW, result, retErr)
+		if result != nil {
+			result.RemoteIP = frameworks.RemoteIP(ctx)
+		}
 		// A submission cancelled because another orchestrator answered first
 		// measured nothing about this one, and a non-retryable (input-class)
 		// error says nothing about its speed.
@@ -1002,25 +1010,38 @@ func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession,
 	}
 
 	payload := &fwpb.OrchestratorTranscodeOutcome{
-		OrchAddr:       orchAddr,
-		OrchUrl:        orchURL,
-		ResolvedIp:     frameworks.ResolvedIPForURL(orchURL),
-		SessionId:      sessionID,
-		ManifestIdHash: manifestHash,
-		SeqNo:          uint64(seg.SeqNo),
-		Success:        err == nil && result != nil,
-		UploadMs:       uint32(uploadDur.Milliseconds()),
-		TranscodeMs:    uint32(transcodeDur.Milliseconds()),
-		OverallMs:      overall,
-		Pixels:         uint64(pixelCount),
-		Profiles:       profiles,
+		OrchAddr:                orchAddr,
+		OrchUrl:                 orchURL,
+		ResolvedIp:              frameworks.RemoteIP(ctx),
+		RemoteIpVerified:        frameworks.RemoteIP(ctx) != "",
+		SourceDurationMs:        uint32(seg.Duration * 1000),
+		ResponseHeadersMs:       uint32(uploadDur.Milliseconds()),
+		ResponseBodyMs:          uint32(transcodeDur.Milliseconds()),
+		TimingBoundariesVersion: 1,
+		SessionId:               sessionID,
+		ManifestIdHash:          manifestHash,
+		SeqNo:                   uint64(seg.SeqNo),
+		Success:                 err == nil && result != nil,
+		UploadMs:                uint32(uploadDur.Milliseconds()),
+		TranscodeMs:             uint32(transcodeDur.Milliseconds()),
+		OverallMs:               overall,
+		Pixels:                  uint64(pixelCount),
+		Profiles:                profiles,
 	}
 	if result != nil {
 		payload.LatencyScore = float32(result.LatencyScore)
 	}
 	if err != nil {
-		payload.ErrorCode = err.Error()
+		payload.ErrorCode = classifyTranscodeError(err)
 		payload.ErrorKind = classifyTranscodeError(err)
+	}
+	payload.Disposition = "workload"
+	if errors.Is(context.Cause(ctx), errHedgeLost) {
+		payload.Disposition = "hedge_loser"
+	} else if err != nil && isNonRetryableError(err) {
+		payload.Disposition = "input_fault"
+	} else if errors.Is(err, context.Canceled) {
+		payload.Disposition = "local_cancelled"
 	}
 	frameworks.EmitTranscodeOutcome(ctx, streamTenantID, payload)
 }
@@ -1092,8 +1113,19 @@ func classifyTranscodeError(err error) string {
 	if err == nil {
 		return ""
 	}
+	if isBadInputError(err) || isNonRetryableError(err) {
+		return "input_fault"
+	}
+	if errors.Is(err, errNoOrchs) {
+		return "no_candidates"
+	}
+	if errors.Is(err, errDiscovery) {
+		return "discovery"
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(msg, "too many sessions"), strings.Contains(msg, "no transcoders"), strings.Contains(msg, "no workers"), strings.Contains(msg, "capacity"):
+		return "capacity"
 	case strings.Contains(msg, "context deadline exceeded"), strings.Contains(msg, "timeout"):
 		return "timeout"
 	case strings.Contains(msg, "context canceled"):

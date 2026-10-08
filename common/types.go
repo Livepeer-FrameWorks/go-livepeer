@@ -64,9 +64,10 @@ const (
 )
 
 type OrchestratorLocalInfo struct {
-	URL     *url.URL `json:"Url"`
-	Score   float32
-	Latency *time.Duration
+	TargetIP string   `json:"target_ip,omitempty"`
+	URL      *url.URL `json:"Url"`
+	Score    float32
+	Latency  *time.Duration
 }
 
 // combines B's local metadata about O with info received from this O

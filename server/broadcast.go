@@ -15,10 +15,12 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 
+	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
 	"github.com/livepeer/go-livepeer/clog"
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/livepeer-data/pkg/data"
@@ -423,6 +425,9 @@ func (sp *SessionPool) refreshSessions(ctx context.Context) {
 		fresh, held = held, nil
 	}
 	for _, sess := range held {
+		if frameworks.Enabled() {
+			frameworks.EmitFilterDecision(ctx, sess.Address(), sess.Transcoder(), "pool", "suspended")
+		}
 		clog.V(common.DEBUG).Infof(ctx, "Not adding suspended orch=%s to the session pool", sess.Transcoder())
 		sp.cleanupSession(sess.PMSessionID)
 	}
@@ -591,6 +596,9 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 		*/
 
 		if _, ok := sp.sessMap[sess.Transcoder()]; ok && sp.suspendedElsewhere(sess) {
+			if frameworks.Enabled() {
+				frameworks.EmitFilterDecision(ctx, sess.Address(), sess.Transcoder(), "selection", "shared_suspension")
+			}
 			// Another stream or gateway suspended this orchestrator in the
 			// shared store; drop it while other sessions remain.
 			clog.Infof(ctx, "Removing orch=%v suspended by another stream or gateway", sess.Transcoder())
@@ -768,6 +776,9 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 // suspendAndRemoveOrch suspends sess's orchestrator for the stream's
 // suspension window and removes the session from its pool. reason is logged.
 func (bsm *BroadcastSessionsManager) suspendAndRemoveOrch(ctx context.Context, sess *BroadcastSession, reason error) {
+	if frameworks.Enabled() {
+		frameworks.EmitFilterDecision(ctx, sess.Address(), sess.Transcoder(), "suspension", classifyTranscodeError(reason))
+	}
 	clog.Warningf(ctx, "Suspending orch=%s reason=%q", sess.Transcoder(), reason)
 	if sess.OrchestratorScore == common.Score_Untrusted {
 		bsm.untrustedPool.suspend(sess.OrchestratorInfo.GetTranscoder())
@@ -1069,6 +1080,7 @@ func selectOrchestrator(ctx context.Context, n *core.LivepeerNode, params *core.
 }
 
 func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSegment, segPar *core.SegmentParameters) ([]string, error) {
+	ctx = frameworks.WithSegment(ctx)
 
 	rtmpStrm := cxn.stream
 	nonce := cxn.nonce
@@ -1193,6 +1205,7 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 	badInput := badInputTracker{}
 	badInputReached := false
 	for len(attempts) < maxAttempts {
+		frameworks.BeginSegmentAttempt(ctx)
 		// Each attempt runs on a different orchestrator: a failing one is
 		// suspended and removed before the next selection.
 		var info *data.TranscodeAttemptInfo
@@ -1250,6 +1263,34 @@ func processSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSeg
 		// orchestrator-scoped or recoverable error, retry on another orchestrator
 	}
 
+	if frameworks.Enabled() && cxn.params != nil {
+		payload := &fwpb.OrchestratorSegmentResult{SessionId: cxn.params.SessionID, ManifestIdHash: hashManifest(string(mid)), SeqNo: uint64(seg.SeqNo), SourceDurationMs: uint32(seg.Duration * 1000), OverallMs: uint32(time.Since(startTime).Milliseconds()), Attempts: uint32(len(attempts)), Success: err == nil && len(urls) > 0, DeadlineExceeded: errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, errSegmentBudgetExhausted), DownstreamStatus: "unknown", Profiles: profileNames(cxn.params.Profiles)}
+		payload.DeliverySessionId = string(mid)
+		seen := map[string]bool{}
+		for _, attempt := range attempts {
+			if attempt.Orchestrator.TranscoderUri != "" {
+				seen[attempt.Orchestrator.TranscoderUri] = true
+			}
+		}
+		if len(seen) > 1 {
+			payload.FallbackCount = uint32(len(seen) - 1)
+		}
+		if len(attempts) > 0 {
+			last := attempts[len(attempts)-1]
+			payload.OrchAddr = last.Orchestrator.Address
+			payload.OrchUrl = last.Orchestrator.TranscoderUri
+		}
+		if err != nil {
+			payload.ErrorKind = classifyTranscodeError(err)
+		}
+		address, uri, ip, submissions, fallbacks, setup := frameworks.SegmentSnapshot(ctx)
+		payload.Attempts, payload.FallbackCount = submissions, fallbacks
+		payload.ReplacementSetupMs = uint32(setup.Milliseconds())
+		if uri != "" {
+			payload.OrchAddr, payload.OrchUrl, payload.ResolvedIp = address, uri, ip
+		}
+		frameworks.EmitSegmentResult(ctx, cxn.params.TenantID, payload)
+	}
 	if MetadataQueue != nil {
 		success := err == nil && len(urls) > 0
 		streamID := string(mid)
@@ -1291,6 +1332,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 	}(time.Now())
 
 	nonce := cxn.nonce
+	selectionStart := time.Now()
 	sessions := cxn.sessManager.selectSessions(ctx)
 	if _, budgeted := segmentBudgetFromContext(ctx); budgeted && len(sessions) == 0 && cxn.sessManager.hasOrchestratorPool() {
 		// Discovery can come back empty while orchestrators start up or are
@@ -1298,6 +1340,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 		// decides when the gateway gives up.
 		sessions = cxn.sessManager.waitForSessions(ctx)
 	}
+	frameworks.SegmentSelectionTime(ctx, time.Since(selectionStart))
 	// Return early under a few circumstances:
 	// View-only (non-transcoded) streams or no sessions available
 	if len(sessions) == 0 {
@@ -1330,6 +1373,7 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 		Address:       sess.Address(),
 	}
 	urls, err = downloadResults(ctx, cxn, segUsed, sess, res)
+	frameworks.SelectedSegmentResult(ctx, sess.Address(), sess.Transcoder(), res.RemoteIP)
 	if err == nil {
 		cxn.sessManager.recordRoundTrip(ctx, sess, seg, roundTrip)
 	}
@@ -1374,6 +1418,7 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 			cancel = func(cause error) { parentCancel(cause); cancelTimeout() }
 		}
 		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel})
+		frameworks.SegmentSubmitted(ctx, sess.Transcoder())
 		submitMultiSession(sctx, sess, segOut, segPar, cxn.nonce, resc)
 		return nil
 	}

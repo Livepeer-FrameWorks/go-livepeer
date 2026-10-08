@@ -205,6 +205,7 @@ type ReceivedTranscodeResult struct {
 	*net.TranscodeData
 	Info         *net.OrchestratorInfo
 	LatencyScore float64
+	RemoteIP     string
 }
 
 type lphttp struct {
@@ -402,6 +403,9 @@ func GetOrchestratorInfo(ctx context.Context, bcast common.Broadcaster, orchestr
 	defer conn.Close()
 
 	req, err := genOrchestratorReq(bcast, params)
+	if err != nil {
+		return nil, err
+	}
 	// Capture the actual RemoteAddr the gRPC client connected to. With
 	// multi-A-record / round-robin DNS, the resolver picks one IP per dial;
 	// the FrameWorks telemetry layer needs to know which one so the per-IP
@@ -410,9 +414,8 @@ func GetOrchestratorInfo(ctx context.Context, bcast common.Broadcaster, orchestr
 	var peerInfo peer.Peer
 	r, err := c.GetOrchestrator(ctx, req, grpc.Peer(&peerInfo))
 	if peerInfo.Addr != nil {
-		host := orchestratorServer.Hostname()
 		if ip := remoteIPOnly(peerInfo.Addr.String()); ip != "" {
-			frameworks.SetDialedIP(host, ip)
+			frameworks.SetRemoteIP(ctx, ip)
 		}
 	}
 	if err != nil {

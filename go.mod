@@ -303,3 +303,5 @@ require (
 )
 
 replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661
+
+replace github.com/Livepeer-FrameWorks/monorepo/pkg => ../monorepo/pkg

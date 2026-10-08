@@ -21,6 +21,7 @@ import (
 	"github.com/livepeer/go-livepeer/eth"
 	lpTypes "github.com/livepeer/go-livepeer/eth/types"
 	"github.com/livepeer/go-livepeer/monitor"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-livepeer/server"
@@ -221,12 +222,14 @@ func (dbo *DBOrchestratorPoolCache) getURLs() ([]*url.URL, error) {
 	}
 
 	var uris []*url.URL
+	allowedWallets := map[string]bool{}
 	for _, orch := range orchs {
+		allowedWallets[strings.ToLower(orch.EthereumAddr)] = true
 		if uri, err := url.Parse(orch.ServiceURI); err == nil {
 			uris = append(uris, uri)
 		}
 	}
-	return uris, nil
+	return frameworks.SupplementURLs(uris, allowedWallets), nil
 }
 
 func (dbo *DBOrchestratorPoolCache) GetInfos() []common.OrchestratorLocalInfo {
@@ -247,9 +250,13 @@ func (dbo *DBOrchestratorPoolCache) GetOrchestrators(ctx context.Context, numOrc
 	}
 
 	pred := func(info *net.OrchestratorInfo) bool {
+		reject := func(reason string) bool {
+			frameworks.EmitFilterDecision(ctx, ethcommon.BytesToAddress(info.Address).Hex(), info.Transcoder, "local_policy", reason)
+			return false
+		}
 		// Return early if no ETH address is specified
 		if len(info.Address) == 0 {
-			return false
+			return reject("missing_identity")
 		}
 
 		if err := dbo.ticketParamsValidator.ValidateTicketParams(pmTicketParams(info.TicketParams)); err != nil {
@@ -257,22 +264,22 @@ func (dbo *DBOrchestratorPoolCache) GetOrchestrators(ctx context.Context, numOrc
 				info.GetTranscoder(),
 				err,
 			)
-			return false
+			return reject("invalid_ticket_params")
 		}
 
 		// check if O has a valid price
 		price, err := common.RatPriceInfo(info.PriceInfo)
 		if err != nil {
 			clog.V(common.DEBUG).Infof(ctx, "invalid price info orch=%v err=%q", info.GetTranscoder(), err)
-			return false
+			return reject("invalid_price")
 		}
 		if price == nil {
 			clog.V(common.DEBUG).Infof(ctx, "no price info received for orch=%v", info.GetTranscoder())
-			return false
+			return reject("missing_price")
 		}
 		if price.Sign() < 0 {
 			clog.V(common.DEBUG).Infof(ctx, "invalid price received for orch=%v price=%v", info.GetTranscoder(), price.RatString())
-			return false
+			return reject("negative_price")
 		}
 		return true
 	}
