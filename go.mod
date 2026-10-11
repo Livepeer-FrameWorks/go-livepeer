@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	contrib.go.opencensus.io/exporter/prometheus v0.4.2
-	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20260901122223-f789dac11149
+	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261011054507-0540e67c18f5
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/bluenviron/gortsplib/v4 v4.12.3
@@ -303,5 +303,3 @@ require (
 )
 
 replace github.com/livepeer/lpms => github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661
-
-replace github.com/Livepeer-FrameWorks/monorepo/pkg => ../monorepo/pkg
