@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
@@ -51,6 +52,7 @@ var (
 	resolver    = newDNSCache(60 * time.Second)
 	logger      logging.Logger
 	spool       *telemetryspool.Queue
+	writer      *spoolWriter
 	networkID   string
 	environment string
 )
@@ -161,6 +163,8 @@ func Init(ctx context.Context) error {
 			environment = "production"
 		}
 		q := spool
+		w := startSpoolWriter(ctx, q.Enqueue)
+		writer = w
 		go q.Run(ctx, func(ctx context.Context, raw []byte) error {
 			var event pb.GatewayTelemetryEvent
 			if err := proto.Unmarshal(raw, &event); err != nil {
@@ -180,6 +184,7 @@ func Init(ctx context.Context) error {
 				case <-ticker.C:
 				}
 				count, _, dropped := q.Stats()
+				dropped += w.dropped.Load()
 				send(ctx, &pb.GatewayTelemetryEvent{Timestamp: timestamppb.Now(), GatewayId: ident.gatewayID, GatewayRegion: ident.gatewayRegion, ClusterId: ident.clusterID, ClusterOwnerTenantId: ident.clusterOwnerTenantID, Payload: &pb.GatewayTelemetryEvent_ObserverReport{ObserverReport: &pb.OrchestratorObserverReport{ReportKind: "heartbeat", CadenceSeconds: 60, QueueRecords: uint32(count), DroppedRecords: dropped, Healthy: true}}})
 			}
 		}()
@@ -346,13 +351,88 @@ func EmitAIOutcome(ctx context.Context, streamTenantID string, payload *pb.Orche
 	})
 }
 
-// send persists before the asynchronous network worker attempts delivery.
+// spoolWriterQueue bounds the events waiting for the spool: about a minute of a
+// busy gateway's events.
+const spoolWriterQueue = 4096
+
+// spoolWriter persists events on its own goroutine. Events are emitted on
+// segment and discovery paths that run within a segment's few-second budget,
+// while a spool write fsyncs the record and its directory under a lock the
+// delivery worker shares; on a busy disk that takes seconds. A full queue
+// drops the event and counts it in the heartbeat's dropped records. Once the
+// context ends (gateway shutdown) the goroutine drains what was queued and
+// exits; segments still in flight emit after that, and offer writes those
+// directly so the spool keeps them for the next start.
+type spoolWriter struct {
+	events  chan spoolEvent
+	dropped atomic.Uint64
+	write   func(spoolEvent)
+	// mu orders offer's queueing against the goroutine's exit: after stopped
+	// is set nothing is queued, so the final drain sees every queued event.
+	mu      sync.Mutex
+	stopped bool
+}
+
+type spoolEvent struct {
+	id  string
+	raw []byte
+}
+
+func startSpoolWriter(ctx context.Context, enqueue func(id string, raw []byte) error) *spoolWriter {
+	w := &spoolWriter{events: make(chan spoolEvent, spoolWriterQueue)}
+	w.write = func(e spoolEvent) {
+		if err := enqueue(e.id, e.raw); err != nil {
+			glog.Warningf("frameworks telemetry spool enqueue failed: %v", err)
+		}
+	}
+	go func() {
+		for {
+			select {
+			case e := <-w.events:
+				w.write(e)
+			case <-ctx.Done():
+				w.mu.Lock()
+				w.stopped = true
+				w.mu.Unlock()
+				for {
+					select {
+					case e := <-w.events:
+						w.write(e)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	return w
+}
+
+func (w *spoolWriter) offer(e spoolEvent) {
+	w.mu.Lock()
+	if w.stopped {
+		w.mu.Unlock()
+		w.write(e)
+		return
+	}
+	select {
+	case w.events <- e:
+	default:
+		if w.dropped.Add(1) == 1 {
+			glog.Warningf("frameworks telemetry: spool queue full; dropping events")
+		}
+	}
+	w.mu.Unlock()
+}
+
+// send hands the event to the spool writer, which persists it before the
+// network worker attempts delivery. It never waits for the disk.
 func send(ctx context.Context, evt *pb.GatewayTelemetryEvent) {
 	mu.RLock()
-	q := spool
+	w := writer
 	network, env := networkID, environment
 	mu.RUnlock()
-	if q == nil {
+	if w == nil {
 		return
 	}
 	evt.EventId = uuid.NewString()
@@ -365,12 +445,11 @@ func send(ctx context.Context, evt *pb.GatewayTelemetryEvent) {
 	evt.Environment = env
 	evt.ProducerKind = "gateway"
 	raw, err := proto.Marshal(evt)
-	if err == nil {
-		err = q.Enqueue(evt.EventId, raw)
-	}
 	if err != nil {
-		glog.Warningf("frameworks telemetry spool enqueue failed: %v", err)
+		glog.Warningf("frameworks telemetry: marshal event failed: %v", err)
+		return
 	}
+	w.offer(spoolEvent{id: evt.EventId, raw: raw})
 }
 func EmitDecision(ctx context.Context, payload *pb.OrchestratorCandidateDecision) {
 	if !Enabled() {
