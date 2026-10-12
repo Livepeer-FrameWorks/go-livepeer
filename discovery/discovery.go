@@ -261,10 +261,7 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 				reason = "incompatible"
 				disposition = "rejected"
 			}
-			address := ""
-			if info != nil {
-				address = hexutil.Encode(info.Address)
-			}
+			address := knownOrchAddr(od, info)
 			frameworks.EmitDecision(ctx, &fwpb.OrchestratorCandidateDecision{OrchAddr: address, OrchUrl: od.LocalInfo.URL.String(), ResolvedIp: frameworks.RemoteIP(ctx), Stage: "admission", Disposition: disposition, Reason: reason, Workload: "transcoding", ElapsedMs: uint32(latency.Milliseconds()), RuleVersion: "gateway-v1"})
 		}
 		if err == nil && !blacklisted && compatible && doingWork {
@@ -398,6 +395,63 @@ func (o *orchestratorPool) pollOrchestratorInfo(ctx context.Context) {
 
 }
 
+// maxLearnedOrchAddrs bounds learnedOrchAddrs. Its keys are the catalog's
+// orchestrator URLs and the nodes they advertise, far fewer than this.
+const maxLearnedOrchAddrs = 4096
+
+// learnedOrchAddrs maps an orchestrator URL to the address its most recent
+// response carried. Both discovery paths build each call's descriptors from
+// URLs alone, so this process-wide map is what attributes a later failed call
+// against the same URL to the orchestrator's identity.
+var learnedOrchAddrs = struct {
+	sync.Mutex
+	byURL map[string]string
+}{byURL: map[string]string{}}
+
+// knownOrchAddr returns the orchestrator address for a discovery call: the
+// one this response carries (which it also records for the URL), else the
+// descriptor's cached response, else the address last learned for the URL.
+// It returns "" for an orchestrator that has never answered with an address.
+func knownOrchAddr(od common.OrchestratorDescriptor, info *net.OrchestratorInfo) string {
+	key := ""
+	if od.LocalInfo != nil && od.LocalInfo.URL != nil {
+		key = od.LocalInfo.URL.String()
+	}
+	if info != nil && len(info.Address) > 0 {
+		addr := hexutil.Encode(info.Address)
+		if key != "" {
+			learnedOrchAddrs.Lock()
+			if _, ok := learnedOrchAddrs.byURL[key]; ok || len(learnedOrchAddrs.byURL) < maxLearnedOrchAddrs {
+				learnedOrchAddrs.byURL[key] = addr
+			}
+			learnedOrchAddrs.Unlock()
+		}
+		return addr
+	}
+	if od.RemoteInfo != nil && len(od.RemoteInfo.Address) > 0 {
+		return hexutil.Encode(od.RemoteInfo.Address)
+	}
+	if key == "" {
+		return ""
+	}
+	learnedOrchAddrs.Lock()
+	defer learnedOrchAddrs.Unlock()
+	return learnedOrchAddrs.byURL[key]
+}
+
+// discoveryOrchAddr is the resource a discovery observation is reported
+// under: the known address, or the URL-derived "url:<host>" key only for an
+// orchestrator that has never answered this gateway with an address.
+func discoveryOrchAddr(od common.OrchestratorDescriptor, info *net.OrchestratorInfo) string {
+	if addr := knownOrchAddr(od, info); addr != "" {
+		return addr
+	}
+	if od.LocalInfo == nil || od.LocalInfo.URL == nil {
+		return ""
+	}
+	return "url:" + od.LocalInfo.URL.Host
+}
+
 // emitFrameworksDiscovery sends per-attempt discovery + per-instance state
 // events to FrameWorks Decklog. Called from getOrchInfo at the result/error
 // boundary so failed dials are durable. The state emission is per-instance
@@ -411,28 +465,7 @@ func emitFrameworksDiscovery(ctx context.Context, od common.OrchestratorDescript
 	}
 	urlStr := od.LocalInfo.URL.String()
 
-	// Orch eth address resolution, in priority order:
-	//   1. The info from THIS attempt (success path).
-	//   2. od.RemoteInfo, the cached info from the most recent prior
-	//      successful discovery in this pool — covers transient failures
-	//      (e.g., orch was up last cycle, blipped this cycle). The eth
-	//      address is stable across restarts so the previous one is
-	//      authoritative.
-	//   3. URL-derived synthetic id "url:<host>" — only used when this is
-	//      the first time we've ever seen the orch and it failed. Ingest keeps
-	//      those rows under the stable URL key; once this gateway has learned
-	//      an eth address, later failures use the eth-address key.
-	// This means once an orch has succeeded once, every subsequent failure
-	// attributes correctly against its hex address — no more orphan buckets.
-	orchAddr := ""
-	switch {
-	case info != nil && len(info.Address) > 0:
-		orchAddr = hexutil.Encode(info.Address)
-	case od.RemoteInfo != nil && len(od.RemoteInfo.Address) > 0:
-		orchAddr = hexutil.Encode(od.RemoteInfo.Address)
-	case od.LocalInfo != nil && od.LocalInfo.URL != nil:
-		orchAddr = "url:" + od.LocalInfo.URL.Host
-	}
+	orchAddr := discoveryOrchAddr(od, info)
 
 	reachable := err == nil && info != nil && info.Transcoder != ""
 	failureKind := ""
