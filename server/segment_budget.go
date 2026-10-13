@@ -41,8 +41,8 @@ const (
 	// answered.
 	hedgeSegDurShare = 0.6
 	minHedgeDelay    = 250 * time.Millisecond
-	// slowStrikeLimit consecutive round trips longer than the segment
-	// duration suspend an orchestrator.
+	// slowStrikeLimit consecutive round trips longer than the workload
+	// tolerates (see recordRoundTrip) suspend an orchestrator.
 	slowStrikeLimit = 2
 )
 

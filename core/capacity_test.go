@@ -91,6 +91,42 @@ func TestCapacityManager_StaleRealtimeRatioStopsRefusing(t *testing.T) {
 	assert.InDelta(t, 0.2, cm.DeviceUtilization("0"), 1e-9)
 }
 
+func TestCapacityManager_RealtimeRatioAgesOutAtTheSampleCadence(t *testing.T) {
+	now := time.Unix(1000, 0)
+	capacityNow = func() time.Time { return now }
+	defer func() { capacityNow = time.Now }()
+	cm := NewCapacityManager([]string{"cpu"}, ffmpeg.Software, 0, 0, func(device string) HWMonitor {
+		return newMockMonitor()
+	})
+
+	// 2 s segments transcoded at 0.95x realtime: the device is near its limit
+	// and refuses new work while those segments keep coming.
+	for i := 0; i < 3; i++ {
+		cm.RecordResult("cpu", 1900*time.Millisecond, 2*time.Second)
+		now = now.Add(2 * time.Second)
+	}
+	now = now.Add(-2 * time.Second)
+	assert.Equal(t, ErrOrchCap, cm.CheckCapacity())
+	now = now.Add(3 * time.Second)
+	assert.Equal(t, ErrOrchCap, cm.CheckCapacity(), "one late sample does not make a working device idle")
+
+	// The gateway stopped sending: two segment durations later the device is
+	// idle and accepts a new session, long before a 30 s VOD segment budget
+	// runs out.
+	now = now.Add(time.Second)
+	assert.NoError(t, cm.CheckCapacity())
+
+	// A device running behind realtime completes a segment only every ratio x
+	// segment duration; its ratio holds for that many longer.
+	for i := 0; i < 10; i++ {
+		cm.RecordResult("cpu", 3*time.Second, time.Second)
+	}
+	now = now.Add(5 * time.Second)
+	assert.Equal(t, ErrOrchCap, cm.CheckCapacity())
+	now = now.Add(time.Second)
+	assert.NoError(t, cm.CheckCapacity())
+}
+
 func TestCapacityManager_AcceptBelowThreshold(t *testing.T) {
 	mon := newMockMonitor()
 	mon.encoderUtil = 0.50

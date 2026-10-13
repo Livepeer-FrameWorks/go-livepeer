@@ -25,24 +25,45 @@ type HWMonitor interface {
 
 // DeviceState tracks per-device capacity measurements.
 type DeviceState struct {
-	realtimeEMA  float64   // EMA of (transcode_duration / segment_duration); 1.0 = realtime
-	sampleCount  int       // number of samples in EMA
-	lastSample   time.Time // when the last sample was recorded
-	lastDecision bool      // hysteresis: true=last decision was accept
+	realtimeEMA  float64       // EMA of (transcode_duration / segment_duration); 1.0 = realtime
+	sampleCount  int           // number of samples in EMA
+	lastSample   time.Time     // when the last sample was recorded
+	lastSegDur   time.Duration // segment duration of the last sample
+	lastDecision bool          // hysteresis: true=last decision was accept
 }
 
-// realtimeEMAStaleness bounds how long the realtime ratio describes a device.
-// Samples only arrive while the device transcodes, so an idle device would
-// otherwise keep its last ratio forever and a slow final segment would refuse
-// all new work indefinitely.
+// realtimeEMAStaleness is the longest the realtime ratio describes a device.
 const realtimeEMAStaleness = 30 * time.Second
+
+// realtimeEMAMissedSamples is how many expected samples a device may miss
+// before its realtime ratio no longer describes it.
+const realtimeEMAMissedSamples = 2
 
 // capacityNow is the clock the realtime ratio ages by.
 var capacityNow = time.Now
 
+// stale reports whether the realtime ratio no longer describes the device.
+// Samples only arrive while the device transcodes: a device keeping up with
+// its work completes one at least every segment duration, and one running
+// behind every ratio x segment duration. Once realtimeEMAMissedSamples of
+// those intervals pass without a sample the device has gone idle, and the
+// ratio of the work it finished must not refuse new work: the gateway whose
+// session that was is often the one asking for a new session.
+func (s *DeviceState) stale(now time.Time) bool {
+	if s.sampleCount == 0 {
+		return true
+	}
+	interval := time.Duration(math.Max(s.realtimeEMA, 1) * float64(s.lastSegDur))
+	horizon := realtimeEMAMissedSamples * interval
+	if horizon <= 0 || horizon > realtimeEMAStaleness {
+		horizon = realtimeEMAStaleness
+	}
+	return now.Sub(s.lastSample) >= horizon
+}
+
 // ema returns the device's realtime ratio, or 0 once its last sample is stale.
 func (s *DeviceState) ema(now time.Time) float64 {
-	if s.sampleCount == 0 || now.Sub(s.lastSample) >= realtimeEMAStaleness {
+	if s.stale(now) {
 		return 0
 	}
 	return s.realtimeEMA
@@ -218,7 +239,7 @@ func (cm *CapacityManager) RecordResult(deviceID string, transcodeDuration, segm
 	// A stale ratio describes earlier work, so the first sample after an idle
 	// period starts the average afresh.
 	now := capacityNow()
-	if state.sampleCount == 0 || now.Sub(state.lastSample) >= realtimeEMAStaleness {
+	if state.stale(now) {
 		state.realtimeEMA = ratio
 		state.sampleCount = 0
 	} else {
@@ -226,6 +247,7 @@ func (cm *CapacityManager) RecordResult(deviceID string, transcodeDuration, segm
 	}
 	state.sampleCount++
 	state.lastSample = now
+	state.lastSegDur = segmentDuration
 }
 
 // Utilization returns the utilization of the least-loaded device (0.0-1.0).

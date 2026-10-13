@@ -1657,6 +1657,27 @@ func TestRecordRoundTrip_SuspendsAfterTwoSlowSegments(t *testing.T) {
 	assert.Greater(bsm.trustedPool.sus.Suspended(sess.Transcoder()), 0)
 }
 
+func TestRecordRoundTrip_VODToleratesItsMinimumSpeed(t *testing.T) {
+	assert := assert.New(t)
+	sess := StubBroadcastSession("https://busy")
+	bsm := bsmWithSessListExt([]*BroadcastSession{sess}, nil, true)
+	bsm.trustedPool.latencyThreshold = latencyThresholdForWorkload(&core.StreamParameters{Workload: core.WorkloadVOD, MinSpeed: 0.5})
+	seg := &stream.HLSSegment{Duration: 1.0}
+
+	// A vod job with minSpeed 0.5 accepts round trips up to twice the segment
+	// duration; an orchestrator delivering them is not slow.
+	for i := 0; i < 5; i++ {
+		bsm.recordRoundTrip(context.Background(), sess, seg, 1900*time.Millisecond)
+	}
+	assert.Contains(bsm.trustedPool.sessMap, sess.Transcoder())
+	assert.Zero(bsm.trustedPool.sus.Suspended(sess.Transcoder()))
+
+	bsm.recordRoundTrip(context.Background(), sess, seg, 2100*time.Millisecond)
+	bsm.recordRoundTrip(context.Background(), sess, seg, 2100*time.Millisecond)
+	assert.NotContains(bsm.trustedPool.sessMap, sess.Transcoder())
+	assert.Greater(bsm.trustedPool.sus.Suspended(sess.Transcoder()), 0)
+}
+
 func TestMaxPrice(t *testing.T) {
 	cfg := NewBroadcastConfig()
 

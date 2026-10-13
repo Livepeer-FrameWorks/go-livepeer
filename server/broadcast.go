@@ -875,15 +875,18 @@ func (bsm *BroadcastSessionsManager) roundTripP90(sess *BroadcastSession) (time.
 }
 
 // recordRoundTrip suspends an orchestrator after slowStrikeLimit consecutive
-// segments whose round trip exceeded the segment duration. The round-trip
-// sample itself already lowered the orchestrator's shared performance score.
+// segments whose round trip exceeded the slowest the workload tolerates: the
+// segment duration for live, the segment duration over the minimum speed for
+// vod (latencyThresholdForWorkload). The round-trip sample itself already
+// lowered the orchestrator's shared performance score.
 func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, roundTrip time.Duration) {
 	segDur := time.Duration(seg.Duration * float64(time.Second))
 	if segDur <= 0 {
 		return
 	}
+	slowest := time.Duration(float64(segDur) * bsm.poolFor(sess).latencyScoreThreshold())
 	sess.lock.Lock()
-	if roundTrip <= segDur {
+	if roundTrip <= slowest {
 		sess.slowStrikes = 0
 		sess.lock.Unlock()
 		return
@@ -894,8 +897,8 @@ func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *
 	if strikes < slowStrikeLimit {
 		return
 	}
-	bsm.suspendAndRemoveOrch(ctx, sess, fmt.Errorf("%d consecutive round trips longer than the segment duration roundTrip=%s segDur=%s",
-		strikes, roundTrip, segDur))
+	bsm.suspendAndRemoveOrch(ctx, sess, fmt.Errorf("%d consecutive round trips longer than the workload tolerates roundTrip=%s tolerated=%s segDur=%s",
+		strikes, roundTrip, slowest, segDur))
 }
 
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
