@@ -325,6 +325,18 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 		return sesss[0]
 	}
 
+	// removeOrch removes the session the pool holds for orch. expectedSess0
+	// and expectedSess1 are copies, and removeSession only removes the
+	// instance the pool holds.
+	removeOrch := func(orch string) {
+		pool.lock.Lock()
+		sess := pool.sessMap[orch]
+		pool.lock.Unlock()
+		if sess != nil {
+			pool.removeSession(sess)
+		}
+	}
+
 	completeSegStub := func(sess *BroadcastSession) {
 		// Create dummy result
 		sess.lock.RLock()
@@ -406,7 +418,7 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 
 	// send in multiple segments with delay > segDur but < 2*segDur and only a single session available
 	pool.suspend(expectedSess0.OrchestratorInfo.GetTranscoder())
-	pool.removeSession(expectedSess0)
+	removeOrch(expectedSess0.Transcoder())
 	assert.Len(pool.sessMap, 1)
 
 	sess0 = sendSegStub()
@@ -427,7 +439,7 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 
 	// send in multiple segments with delay > 2*segDur and only a single session available
 	pool.suspend(expectedSess0.OrchestratorInfo.Transcoder)
-	pool.removeSession(expectedSess0)
+	removeOrch(expectedSess0.Transcoder())
 	assert.Len(pool.sessMap, 1)
 
 	sess0 = sendSegStub()
@@ -446,8 +458,8 @@ func TestSelectSession_MultipleInFlight(t *testing.T) {
 	// remove both session and check if selector returns nil and sets lastSession to nil
 	pool.suspend(expectedSess0.OrchestratorInfo.Transcoder)
 	pool.suspend(expectedSess1.OrchestratorInfo.Transcoder)
-	pool.removeSession(expectedSess0)
-	pool.removeSession(expectedSess1)
+	removeOrch(expectedSess0.Transcoder())
+	removeOrch(expectedSess1.Transcoder())
 	pool.lock.Lock() // refresh session could be running in parallel and modifying sessMap
 	assert.Len(pool.sessMap, 0)
 	pool.lock.Unlock()

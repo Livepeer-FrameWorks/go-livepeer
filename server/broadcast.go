@@ -177,6 +177,10 @@ type SessionPool struct {
 	cleanupSession sessionsCleanup
 	sus            orchSuspender
 
+	// endSession tells the orchestrator of a session this pool dropped to
+	// release it. It must not block. nil sends nothing.
+	endSession func(*BroadcastSession)
+
 	// latencyThreshold is the effective LatencyScore above which an
 	// orchestrator is swapped. Zero means use SELECTOR_LATENCY_SCORE_THRESHOLD;
 	// vod workloads relax it toward 1/MinSpeed so a single slow segment doesn't
@@ -604,6 +608,7 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 			clog.Infof(ctx, "Removing orch=%v suspended by another stream or gateway", sess.Transcoder())
 			sp.cleanupSession(sess.PMSessionID)
 			delete(sp.sessMap, sess.Transcoder())
+			sp.endDropped(sess)
 			sess.SegsInFlight = nil
 			sp.lastSess = removeSessionFromList(sp.lastSess, sess)
 			continue
@@ -649,22 +654,45 @@ func (sp *SessionPool) selectSessions(ctx context.Context, sessionsNum int) []*B
 	return selectedSessions
 }
 
+// removeSession drops session from the pool and ends it on its orchestrator.
+// The pool holds at most one session per orchestrator URL; a session that
+// already left the pool, for example one reporting a late result after its
+// orchestrator was re-added, leaves the orchestrator's current session alone.
 func (sp *SessionPool) removeSession(session *BroadcastSession) {
 	sp.lock.Lock()
 	defer sp.lock.Unlock()
 
 	sp.cleanupSession(session.PMSessionID)
+	if existing, ok := sp.sessMap[session.Transcoder()]; !ok || existing != session {
+		return
+	}
 	delete(sp.sessMap, session.Transcoder())
+	sp.endDropped(session)
 }
 
-func (sp *SessionPool) cleanup() {
+// endDropped asks the orchestrator of a session that left the pool to release
+// it, so the session stops counting against its MaxSessions and capacity
+// checks until the orchestrator's idle timeout. The caller holds sp.lock.
+func (sp *SessionPool) endDropped(sess *BroadcastSession) {
+	if sp.endSession != nil {
+		sp.endSession(sess)
+	}
+}
+
+// cleanup empties the pool at stream end and returns the sessions it held.
+func (sp *SessionPool) cleanup() []*BroadcastSession {
 	sp.lock.Lock()
 	defer sp.lock.Unlock()
+	held := make([]*BroadcastSession, 0, len(sp.sessMap))
+	for _, sess := range sp.sessMap {
+		held = append(held, sess)
+	}
 	sp.finished = true
 	sp.lastSess = nil
 	sp.sel.Clear()
 	sp.inSel = make(map[*BroadcastSession]bool)
 	sp.sessMap = make(map[string]*BroadcastSession) // prevent segfaults
+	return held
 }
 
 func (sp *SessionPool) completeSession(sess *BroadcastSession) {
@@ -762,6 +790,9 @@ func NewSessionManager(ctx context.Context, node *core.LivepeerNode, params *cor
 		trustedPool:   NewSessionPool(params.ManifestID, int(trustedPoolSize), trustedNumOrchs, susTrusted, createSessionsTrusted, cleanupSession, trustedSel),
 		untrustedPool: NewSessionPool(params.ManifestID, int(untrustedPoolSize), untrustedNumOrchs, susUntrusted, createSessionsUntrusted, cleanupSession, untrustedSel),
 	}
+	endSession := func(sess *BroadcastSession) { endOrchestratorSession(ctx, sess) }
+	bsm.trustedPool.endSession = endSession
+	bsm.untrustedPool.endSession = endSession
 	if p, ok := perfReader.(*orchPerf); ok {
 		bsm.perf = p
 	}
@@ -940,31 +971,35 @@ func (bsm *BroadcastSessionsManager) selectSessions(ctx context.Context) []*Broa
 	return sessions
 }
 
+// cleanup ends every session still in the pools on its orchestrator at stream
+// end. Sessions dropped earlier were ended when they left their pool.
 func (bsm *BroadcastSessionsManager) cleanup(ctx context.Context) {
-	// send tear down signals to each orchestrator session to free resources
-	for _, sess := range bsm.untrustedPool.sessMap {
-		bsm.completeSession(ctx, sess, true)
-	}
-	for _, sess := range bsm.trustedPool.sessMap {
-		bsm.completeSession(ctx, sess, true)
-	}
-
 	bsm.sessLock.Lock()
 	defer bsm.sessLock.Unlock()
 	bsm.finished = true
 
-	bsm.trustedPool.cleanup()
-	bsm.untrustedPool.cleanup()
+	for _, pool := range []*SessionPool{bsm.untrustedPool, bsm.trustedPool} {
+		for _, sess := range pool.cleanup() {
+			endOrchestratorSession(ctx, sess)
+		}
+	}
+}
+
+// endOrchestratorSession tells sess's orchestrator, in the background, that
+// the gateway no longer uses the session. Failures are logged: the
+// orchestrator still releases the session once it idles out.
+func endOrchestratorSession(ctx context.Context, sess *BroadcastSession) {
+	go func() {
+		if err := EndTranscodingSession(ctx, sess); err != nil {
+			clog.Errorf(ctx, "Error completing transcoding session: %q", err)
+		}
+	}()
 }
 
 // the caller needs to ensure bsm.sessLock is acquired before calling this.
 func (bsm *BroadcastSessionsManager) completeSessionUnsafe(ctx context.Context, sess *BroadcastSession, tearDown bool) {
 	if tearDown {
-		go func() {
-			if err := EndTranscodingSession(ctx, sess); err != nil {
-				clog.Errorf(ctx, "Error completing transcoding session: %q", err)
-			}
-		}()
+		endOrchestratorSession(ctx, sess)
 	}
 	if sess.OrchestratorScore == common.Score_Untrusted {
 		bsm.untrustedPool.completeSession(sess)

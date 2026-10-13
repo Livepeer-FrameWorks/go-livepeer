@@ -45,6 +45,10 @@ import (
 
 const GRPCConnectTimeout = 3 * time.Second
 const GRPCTimeout = 8 * time.Second
+
+// endSessionTimeout bounds the EndTranscodingSession call to an orchestrator.
+var endSessionTimeout = GRPCTimeout
+
 const HTTPIdleTimeout = 10 * time.Minute
 
 var authTokenValidPeriod = 30 * time.Minute
@@ -441,6 +445,9 @@ func remoteIPOnly(addr string) string {
 // EndTranscodingSession tears down an orchestrator session when the gateway no
 // longer needs it.
 func EndTranscodingSession(ctx context.Context, sess *BroadcastSession) error {
+	if sess.OrchestratorInfo.GetAuthToken() == nil {
+		return nil
+	}
 	uri, err := url.Parse(sess.Transcoder())
 	if err != nil {
 		return err
@@ -452,7 +459,12 @@ func EndTranscodingSession(ctx context.Context, sess *BroadcastSession) error {
 	defer conn.Close()
 
 	req, err := genEndSessionRequest(sess)
-	_, err = c.EndTranscodingSession(context.Background(), req)
+	if err != nil {
+		return err
+	}
+	rpcCtx, cancel := context.WithTimeout(context.Background(), endSessionTimeout)
+	defer cancel()
+	_, err = c.EndTranscodingSession(rpcCtx, req)
 	if err != nil {
 		return errors.Wrapf(err, "Could not end orchestrator session orch=%v", sess.Transcoder())
 	}
