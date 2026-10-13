@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -311,8 +312,10 @@ func ratToFixed(rat *big.Rat, scalingFactor int64) (int64, error) {
 	return fp, nil
 }
 
-// Package-level RNG; tests can override it.
+// Package-level RNG; tests can override it. A rand.Rand built from NewSource
+// is not safe for concurrent use, so every read goes through pkgRNGMu.
 var PkgRNG = rand.New(rand.NewSource(time.Now().UnixNano()))
+var pkgRNGMu sync.Mutex
 
 // RandomIDGenerator generates random hexadecimal string of specified length
 // defined as variable for unit tests
@@ -322,7 +325,9 @@ var RandomIDGenerator = func(length uint) string {
 
 var RandomBytesGenerator = func(length uint) []byte {
 	x := make([]byte, length, length)
+	pkgRNGMu.Lock()
 	PkgRNG.Read(x)
+	pkgRNGMu.Unlock()
 	return x
 }
 

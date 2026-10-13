@@ -249,6 +249,7 @@ func TestStopSessionErrors(t *testing.T) {
 		"Unable to submit segment 5 Post https://127.0.0.1:8936/segment: dial tcp 127.0.0.1:8936: getsockopt: connection refused",
 		core.ErrOrchBusy.Error(),
 		core.ErrOrchCap.Error(),
+		core.ErrOrchSessionEnded.Error(),
 	}
 
 	// Sanity check that we're checking each failure case

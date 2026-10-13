@@ -1767,7 +1767,7 @@ func downloadResults(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSe
 	return segURLs, nil
 }
 
-var sessionErrStrings = []string{"dial tcp", "unexpected EOF", core.ErrOrchBusy.Error(), core.ErrOrchCap.Error()}
+var sessionErrStrings = []string{"dial tcp", "unexpected EOF", core.ErrOrchBusy.Error(), core.ErrOrchCap.Error(), core.ErrOrchSessionEnded.Error()}
 
 var sessionErrRegex = common.GenErrRegex(sessionErrStrings)
 

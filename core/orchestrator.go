@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -578,11 +579,15 @@ func NewOrchestrator(n *LivepeerNode, rm common.RoundsManager) *orchestrator {
 	if n.Eth != nil {
 		addr = n.Eth.Account().Address
 	}
+	// secret keys the HMAC that authenticates session auth tokens, so it comes
+	// from crypto/rand rather than the time-seeded package RNG.
+	secret := make([]byte, 32)
+	_, _ = crand.Read(secret)
 	return &orchestrator{
 		node:    n,
 		address: addr,
 		rm:      rm,
-		secret:  common.RandomBytesGenerator(32),
+		secret:  secret,
 	}
 }
 
@@ -590,6 +595,7 @@ func NewOrchestrator(n *LivepeerNode, rm common.RoundsManager) *orchestrator {
 
 var ErrOrchBusy = errors.New("OrchestratorBusy")
 var ErrOrchCap = errors.New("OrchestratorCapped")
+var ErrOrchSessionEnded = errors.New("OrchestratorSessionEnded")
 
 type TranscodeResult struct {
 	Err           error
@@ -695,10 +701,22 @@ func (n *LivepeerNode) sendToTranscodeLoop(ctx context.Context, md *SegTranscodi
 		return nil, err
 	}
 	segChanData := &SegChanData{ctx: ctx, seg: seg, md: md, res: make(chan *TranscodeResult, 1)}
+	// endTranscodingSession closes a segment channel only under the segmentMutex
+	// write lock and unregisters it in the same critical section, so a send made
+	// under the read lock while ch is still the registered channel cannot hit a
+	// closed channel. The send never blocks, so holding the read lock is cheap.
+	n.segmentMutex.RLock()
+	if n.SegmentChans[ManifestID(md.AuthToken.SessionId)] != ch {
+		n.segmentMutex.RUnlock()
+		clog.V(common.DEBUG).Infof(ctx, "Transcoding session ended before the segment was submitted")
+		return nil, ErrOrchSessionEnded
+	}
 	select {
 	case ch <- segChanData:
+		n.segmentMutex.RUnlock()
 		clog.V(common.DEBUG).Infof(ctx, "Submitted segment to transcode loop ")
 	default:
+		n.segmentMutex.RUnlock()
 		// sending segChan should not block; if it does, the channel is busy
 		clog.Errorf(ctx, "Transcoder was busy with a previous segment")
 		return nil, ErrOrchBusy
@@ -871,14 +889,23 @@ func (n *LivepeerNode) transcodeSegmentLoop(logCtx context.Context, md *SegTrans
 	n.storageMutex.Lock()
 	n.StorageConfigs[md.AuthToken.SessionId] = &storageConfig
 	n.storageMutex.Unlock()
+	loopTimeout := transcodeLoopTimeout
 	go func() {
 		for {
 			// XXX make context timeout configurable
-			ctx, cancel := context.WithTimeout(context.Background(), transcodeLoopTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), loopTimeout)
 			select {
 			case <-ctx.Done():
+				cancel()
 				clog.V(common.DEBUG).Infof(logCtx, "Segment loop timed out; closing ")
-				n.endTranscodingSession(md.AuthToken.SessionId, logCtx)
+				n.endSession(md.AuthToken.SessionId, segChan, logCtx)
+				// segChan is closed now: either by the call above or by an earlier
+				// end, which is the only way another channel could be registered for
+				// this session ID. Segments queued after the timeout fired have no
+				// loop left to transcode them, so their submitters get an answer here.
+				for chanData := range segChan {
+					chanData.res <- &TranscodeResult{Err: ErrOrchSessionEnded}
+				}
 				return
 			case chanData, ok := <-segChan:
 				// Check if channel was closed due to endTranscodingSession being called by B
@@ -895,14 +922,26 @@ func (n *LivepeerNode) transcodeSegmentLoop(logCtx context.Context, md *SegTrans
 }
 
 func (n *LivepeerNode) endTranscodingSession(sessionId string, logCtx context.Context) {
-	// timeout; clean up goroutine here
-	var (
-		exists  bool
-		storage *transcodeConfig
-		sess    *RemoteTranscoder
-	)
+	n.endSession(sessionId, nil, logCtx)
+}
+
+// endSession tears down the session sessionId names. With owner set it does so
+// only while owner is the session's registered segment channel: a loop that
+// times out after its session was ended must not end a newer session that
+// reuses the ID. The whole teardown runs under segmentMutex, which
+// getSegmentChan also holds while it creates a session's channel, loop and
+// storage, so a session reusing the ID cannot start halfway through and lose
+// its storage or remote transcoder assignment to this teardown.
+func (n *LivepeerNode) endSession(sessionId string, owner SegmentChan, logCtx context.Context) {
+	mid := ManifestID(sessionId)
+	n.segmentMutex.Lock()
+	defer n.segmentMutex.Unlock()
+	segChan, exists := n.SegmentChans[mid]
+	if owner != nil && (!exists || segChan != owner) {
+		return
+	}
 	n.storageMutex.Lock()
-	if storage, exists = n.StorageConfigs[sessionId]; exists {
+	if storage, ok := n.StorageConfigs[sessionId]; ok {
 		storage.OS.EndSession()
 		storage.LocalOS.EndSession()
 		delete(n.StorageConfigs, sessionId)
@@ -912,7 +951,7 @@ func (n *LivepeerNode) endTranscodingSession(sessionId string, logCtx context.Co
 	if n.TranscoderManager != nil {
 		n.TranscoderManager.RTmutex.Lock()
 		// send empty segment to signal transcoder internal session teardown if session exist
-		if sess, exists = n.TranscoderManager.streamSessions[sessionId]; exists {
+		if sess, ok := n.TranscoderManager.streamSessions[sessionId]; ok {
 			segData := &net.SegData{
 				AuthToken: &net.AuthToken{SessionId: sessionId},
 			}
@@ -924,17 +963,12 @@ func (n *LivepeerNode) endTranscodingSession(sessionId string, logCtx context.Co
 		n.TranscoderManager.completeStreamSession(sessionId)
 		n.TranscoderManager.RTmutex.Unlock()
 	}
-	n.segmentMutex.Lock()
-	mid := ManifestID(sessionId)
-	if _, exists = n.SegmentChans[mid]; exists {
-		close(n.SegmentChans[mid])
+	if exists {
+		close(segChan)
 		delete(n.SegmentChans, mid)
 		if lpmon.Enabled {
 			lpmon.CurrentSessions(len(n.SegmentChans))
 		}
-	}
-	n.segmentMutex.Unlock()
-	if exists {
 		clog.V(common.DEBUG).Infof(logCtx, "Transcoding session ended by the Broadcaster for sessionID=%v", sessionId)
 	}
 }

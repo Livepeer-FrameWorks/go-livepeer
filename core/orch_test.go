@@ -29,6 +29,7 @@ import (
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-tools/drivers"
 	"github.com/livepeer/lpms/ffmpeg"
+	"github.com/livepeer/lpms/stream"
 
 	"github.com/livepeer/go-livepeer/net"
 )
@@ -2026,4 +2027,146 @@ func tempDBWithOrchs(t *testing.T, orchs []*common.DBOrch) (*common.DB, *sql.DB)
 	}
 
 	return dbh, dbraw
+}
+
+type sessionRaceTranscoder struct{}
+
+func (sessionRaceTranscoder) Transcode(_ context.Context, md *SegTranscodingMetadata) (*TranscodeData, error) {
+	segs := make([]*TranscodedSegmentData, len(md.Profiles))
+	for i := range segs {
+		segs[i] = &TranscodedSegmentData{Data: make([]byte, 32)}
+	}
+	return &TranscodeData{Segments: segs}, nil
+}
+
+func (sessionRaceTranscoder) EndTranscodingSession(string) {}
+
+// Submits segments while the same session is ended by the broadcaster and by
+// the loop's own idle timeout. Every submit must return promptly with a result,
+// ErrOrchBusy or ErrOrchSessionEnded: never panic on the closed channel and
+// never wait on a segment left queued in a channel no loop reads any more.
+func TestSendToTranscodeLoop_ConcurrentSessionEnd(t *testing.T) {
+	oldNodeStorage := drivers.NodeStorage
+	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
+	defer func() { drivers.NodeStorage = oldNodeStorage }()
+	oldTimeout := transcodeLoopTimeout
+	transcodeLoopTimeout = time.Millisecond
+	defer func() { transcodeLoopTimeout = oldTimeout }()
+	oldMaxSessions := MaxSessions
+	MaxSessions = 10
+	defer func() { MaxSessions = oldMaxSessions }()
+
+	n, _ := NewLivepeerNode(nil, t.TempDir(), nil)
+	n.Transcoder = sessionRaceTranscoder{}
+	const sessionID = "race-session"
+
+	const submitters, iterations = 8, 500
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	var enders sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		enders.Add(1)
+		go func() {
+			defer enders.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					n.endTranscodingSession(sessionID, context.Background())
+				}
+			}
+		}()
+	}
+
+	var ok, ended, busy atomic.Int64
+	errs := make(chan error, submitters)
+	for i := 0; i < submitters; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				md := &SegTranscodingMetadata{
+					ManifestID: ManifestID(sessionID),
+					Seq:        int64(i*iterations + j),
+					Profiles:   []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9},
+					AuthToken:  &net.AuthToken{SessionId: sessionID},
+				}
+				seg := &stream.HLSSegment{SeqNo: uint64(j), Data: []byte("segment")}
+				_, err := n.sendToTranscodeLoop(context.Background(), md, seg)
+				switch {
+				case err == nil:
+					ok.Add(1)
+				case errors.Is(err, ErrOrchSessionEnded):
+					ended.Add(1)
+				case errors.Is(err, ErrOrchBusy):
+					busy.Add(1)
+				default:
+					errs <- err
+					return
+				}
+			}
+		}(i)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("a segment submit never returned after its session ended")
+	}
+	close(stop)
+	enders.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("unexpected submit error: %v", err)
+	}
+	n.endTranscodingSession(sessionID, context.Background())
+	t.Logf("ok=%d ended=%d busy=%d", ok.Load(), ended.Load(), busy.Load())
+	require.Positive(t, ok.Load())
+}
+
+// A loop whose session was ended and whose ID was then reused by a new
+// session may still reach its idle timeout; that timeout must leave the new
+// session's channel and storage alone.
+func TestTranscodeLoopTimeout_LeavesReusedSessionAlone(t *testing.T) {
+	oldNodeStorage := drivers.NodeStorage
+	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
+	defer func() { drivers.NodeStorage = oldNodeStorage }()
+	oldTimeout := transcodeLoopTimeout
+	transcodeLoopTimeout = 50 * time.Millisecond
+	defer func() { transcodeLoopTimeout = oldTimeout }()
+
+	n, _ := NewLivepeerNode(nil, t.TempDir(), nil)
+	n.Transcoder = sessionRaceTranscoder{}
+	const sessionID = "reused-session"
+	mid := ManifestID(sessionID)
+	md := &SegTranscodingMetadata{ManifestID: mid, AuthToken: &net.AuthToken{SessionId: sessionID}}
+
+	// The ended session's loop, whose idle timer is already running.
+	old := make(SegmentChan, maxSegmentChannels)
+	require.NoError(t, n.transcodeSegmentLoop(context.Background(), md, old))
+
+	// The new session that reuses the ID, registered as getSegmentChan does.
+	newer := make(SegmentChan, maxSegmentChannels)
+	los := drivers.NodeStorage.NewSession(sessionID)
+	newerStorage := &transcodeConfig{OS: los, LocalOS: los}
+	n.segmentMutex.Lock()
+	n.SegmentChans[mid] = newer
+	n.segmentMutex.Unlock()
+	n.storageMutex.Lock()
+	n.StorageConfigs[sessionID] = newerStorage
+	n.storageMutex.Unlock()
+
+	time.Sleep(6 * transcodeLoopTimeout)
+	// The old channel was closed when its session ended.
+	close(old)
+
+	assert.True(t, getSegChan(n, mid) == newer, "the old loop's timeout ended the new session's segment channel")
+	n.storageMutex.RLock()
+	storage := n.StorageConfigs[sessionID]
+	n.storageMutex.RUnlock()
+	assert.True(t, storage == newerStorage, "the old loop's timeout removed the new session's storage")
+	n.endTranscodingSession(sessionID, context.Background())
 }
