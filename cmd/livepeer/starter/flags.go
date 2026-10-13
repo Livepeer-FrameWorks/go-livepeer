@@ -93,7 +93,7 @@ func NewLivepeerConfig(fs *flag.FlagSet) LivepeerConfig {
 	cfg.EthAcctAddr = fs.String("ethAcctAddr", *cfg.EthAcctAddr, "Existing Eth account address. For use when multiple ETH accounts exist in the keystore directory")
 	cfg.EthPassword = fs.String("ethPassword", *cfg.EthPassword, "Password for existing Eth account address or path to file")
 	cfg.EthKeystorePath = fs.String("ethKeystorePath", *cfg.EthKeystorePath, "Path to ETH keystore directory or keyfile. If keyfile, overrides -ethAcctAddr and uses parent directory")
-	cfg.EthOrchAddr = fs.String("ethOrchAddr", *cfg.EthOrchAddr, "ETH address of an on-chain registered orchestrator")
+	cfg.EthOrchAddr = fs.String("ethOrchAddr", *cfg.EthOrchAddr, "ETH address of an on-chain registered orchestrator; an offchain orchestrator reports it as its identity in discovery")
 	cfg.EthUrl = fs.String("ethUrl", *cfg.EthUrl, "Ethereum node JSON-RPC URL")
 	cfg.TxTimeout = fs.Duration("transactionTimeout", *cfg.TxTimeout, "Amount of time to wait for an Ethereum transaction to confirm before timing out")
 	cfg.MaxTxReplacements = fs.Int("maxTransactionReplacements", *cfg.MaxTxReplacements, "Number of times to automatically replace pending Ethereum transactions")

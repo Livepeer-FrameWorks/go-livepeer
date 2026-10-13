@@ -80,6 +80,18 @@ func (orch *orchestrator) Address() ethcommon.Address {
 	return orch.address
 }
 
+// SetOffchainAddress sets the identity an offchain orchestrator, which has no
+// Ethereum account, reports in discovery and orchestrator info, so a catalog
+// that lists this address can attribute its responses. An onchain
+// orchestrator always reports its account address.
+func (orch *orchestrator) SetOffchainAddress(addr ethcommon.Address) error {
+	if orch.node != nil && orch.node.Eth != nil {
+		return errors.New("an onchain orchestrator reports its account address")
+	}
+	orch.address = addr
+	return nil
+}
+
 func (orch *orchestrator) TranscoderSecret() string {
 	return orch.node.OrchSecret
 }

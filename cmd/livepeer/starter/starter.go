@@ -2061,6 +2061,14 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		}
 
 		orch := core.NewOrchestrator(s.LivepeerNode, timeWatcher)
+		if n.Eth == nil && *cfg.EthOrchAddr != "" {
+			if !ethcommon.IsHexAddress(*cfg.EthOrchAddr) {
+				exit("invalid -ethOrchAddr %q", *cfg.EthOrchAddr)
+			}
+			if err := orch.SetOffchainAddress(ethcommon.HexToAddress(*cfg.EthOrchAddr)); err != nil {
+				exit("cannot set the offchain orchestrator identity: %v", err)
+			}
+		}
 
 		if *cfg.UseLiveRunners || *cfg.LiveRunnerConfig != "" {
 			if n.OrchSecret == "" && *cfg.LiveRunnerConfig == "" {
