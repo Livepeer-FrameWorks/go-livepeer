@@ -144,8 +144,12 @@ type LivepeerNode struct {
 	Capabilities         *Capabilities
 	ExternalCapabilities *ExternalCapabilities
 	AutoAdjustPrice      bool
-	AutoSessionLimit     bool
-	CapacityMgr          *CapacityManager
+	// QuoteOffchainPrice quotes the configured base prices without a ticket
+	// Recipient, so an offchain orchestrator started with -pricePerUnit is
+	// charged for its work while receiving no tickets.
+	QuoteOffchainPrice bool
+	AutoSessionLimit   bool
+	CapacityMgr        *CapacityManager
 
 	TrickleInsecureSkipVerify bool
 

@@ -855,6 +855,8 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 			glog.Error(err)
 			return
 		}
+
+		setOffchainOrchestratorPrices(n, cfg)
 	} else {
 		n.SelectionAlgorithm, err = createSelectionAlgorithm(cfg)
 		if err != nil {
@@ -1066,55 +1068,8 @@ func StartLivepeer(ctx context.Context, cfg LivepeerConfig) {
 		}
 
 		if *cfg.Orchestrator {
-			// Set price per pixel base info
-			pixelsPerUnit, ok := new(big.Rat).SetString(*cfg.PixelsPerUnit)
-			if !ok || !pixelsPerUnit.IsInt() {
-				panic(fmt.Errorf("-pixelsPerUnit must be a valid integer, provided %v", *cfg.PixelsPerUnit))
-			}
-			if pixelsPerUnit.Sign() <= 0 {
-				// Can't divide by 0
-				panic(fmt.Errorf("-pixelsPerUnit must be > 0, provided %v", *cfg.PixelsPerUnit))
-			}
-			if cfg.PricePerUnit == nil && !*cfg.AIWorker {
-				// Prevent orchestrators from unknowingly doing free work.
-				panic(fmt.Errorf("-pricePerUnit must be set"))
-			} else if cfg.PricePerUnit != nil {
-				pricePerUnit, currency, err := parsePricePerUnit(*cfg.PricePerUnit)
-				if err != nil {
-					panic(fmt.Errorf("-pricePerUnit must be a valid integer with an optional currency, provided %v", *cfg.PricePerUnit))
-				} else if pricePerUnit.Sign() < 0 {
-					panic(fmt.Errorf("-pricePerUnit must be >= 0, provided %s", pricePerUnit))
-				}
-				pricePerPixel := new(big.Rat).Quo(pricePerUnit, pixelsPerUnit)
-				autoPrice, err := core.NewAutoConvertedPrice(currency, pricePerPixel, func(price *big.Rat) {
-					unit := "pixel"
-					if *cfg.AIWorker {
-						unit = "compute unit"
-					}
-					glog.Infof("Price: %v wei per %s\n", price.FloatString(3), unit)
-				})
-				if err != nil {
-					panic(fmt.Errorf("Error converting price: %v", err))
-				}
-				n.SetBasePrice("default", autoPrice)
-			}
-
-			if *cfg.PricePerBroadcaster != "" {
-				glog.Warning("-PricePerBroadcaster flag is deprecated and will be removed in a future release. Please use -PricePerGateway instead")
-				cfg.PricePerGateway = cfg.PricePerBroadcaster
-			}
-			gatewayPrices := getGatewayPrices(*cfg.PricePerGateway)
-			for _, p := range gatewayPrices {
-				p := p
-				pricePerPixel := new(big.Rat).Quo(p.PricePerUnit, p.PixelsPerUnit)
-				autoPrice, err := core.NewAutoConvertedPrice(p.Currency, pricePerPixel, func(price *big.Rat) {
-					glog.Infof("Price: %v wei per pixel for gateway %v", price.FloatString(3), p.EthAddress)
-				})
-				if err != nil {
-					panic(fmt.Errorf("Error converting price for gateway %s: %v", p.EthAddress, err))
-				}
-				n.SetBasePrice(p.EthAddress, autoPrice)
-			}
+			// Prevent orchestrators from unknowingly doing free work.
+			setOrchestratorBasePrices(n, cfg, !*cfg.AIWorker)
 
 			n.AutoSessionLimit = *cfg.MaxSessions == "auto"
 			n.AutoAdjustPrice = *cfg.AutoAdjustPrice
@@ -2485,6 +2440,71 @@ type GatewayPrice struct {
 	PricePerUnit  *big.Rat
 	Currency      string
 	PixelsPerUnit *big.Rat
+}
+
+// setOrchestratorBasePrices sets the orchestrator's default and per-gateway
+// prices per pixel from -pricePerUnit, -pixelsPerUnit and -pricePerGateway.
+// requirePrice refuses a missing -pricePerUnit.
+func setOrchestratorBasePrices(n *core.LivepeerNode, cfg LivepeerConfig, requirePrice bool) {
+	pixelsPerUnit, ok := new(big.Rat).SetString(*cfg.PixelsPerUnit)
+	if !ok || !pixelsPerUnit.IsInt() {
+		panic(fmt.Errorf("-pixelsPerUnit must be a valid integer, provided %v", *cfg.PixelsPerUnit))
+	}
+	if pixelsPerUnit.Sign() <= 0 {
+		// Can't divide by 0
+		panic(fmt.Errorf("-pixelsPerUnit must be > 0, provided %v", *cfg.PixelsPerUnit))
+	}
+	if cfg.PricePerUnit == nil && requirePrice {
+		panic(fmt.Errorf("-pricePerUnit must be set"))
+	} else if cfg.PricePerUnit != nil {
+		pricePerUnit, currency, err := parsePricePerUnit(*cfg.PricePerUnit)
+		if err != nil {
+			panic(fmt.Errorf("-pricePerUnit must be a valid integer with an optional currency, provided %v", *cfg.PricePerUnit))
+		} else if pricePerUnit.Sign() < 0 {
+			panic(fmt.Errorf("-pricePerUnit must be >= 0, provided %s", pricePerUnit))
+		}
+		pricePerPixel := new(big.Rat).Quo(pricePerUnit, pixelsPerUnit)
+		autoPrice, err := core.NewAutoConvertedPrice(currency, pricePerPixel, func(price *big.Rat) {
+			unit := "pixel"
+			if *cfg.AIWorker {
+				unit = "compute unit"
+			}
+			glog.Infof("Price: %v wei per %s\n", price.FloatString(3), unit)
+		})
+		if err != nil {
+			panic(fmt.Errorf("Error converting price: %v", err))
+		}
+		n.SetBasePrice("default", autoPrice)
+	}
+
+	if *cfg.PricePerBroadcaster != "" {
+		glog.Warning("-PricePerBroadcaster flag is deprecated and will be removed in a future release. Please use -PricePerGateway instead")
+		cfg.PricePerGateway = cfg.PricePerBroadcaster
+	}
+	gatewayPrices := getGatewayPrices(*cfg.PricePerGateway)
+	for _, p := range gatewayPrices {
+		p := p
+		pricePerPixel := new(big.Rat).Quo(p.PricePerUnit, p.PixelsPerUnit)
+		autoPrice, err := core.NewAutoConvertedPrice(p.Currency, pricePerPixel, func(price *big.Rat) {
+			glog.Infof("Price: %v wei per pixel for gateway %v", price.FloatString(3), p.EthAddress)
+		})
+		if err != nil {
+			panic(fmt.Errorf("Error converting price for gateway %s: %v", p.EthAddress, err))
+		}
+		n.SetBasePrice(p.EthAddress, autoPrice)
+	}
+}
+
+// setOffchainOrchestratorPrices quotes an explicit -pricePerUnit offchain as
+// on a chain, but without a ticket recipient: gateways compute the service
+// charge and send no tickets. Without a price feed, the price must be in wei
+// or ETH. An orchestrator without -pricePerUnit quotes no price.
+func setOffchainOrchestratorPrices(n *core.LivepeerNode, cfg LivepeerConfig) {
+	if !*cfg.Orchestrator || cfg.PricePerUnit == nil {
+		return
+	}
+	setOrchestratorBasePrices(n, cfg, true)
+	n.QuoteOffchainPrice = true
 }
 
 func getGatewayPrices(gatewayPrices string) []GatewayPrice {

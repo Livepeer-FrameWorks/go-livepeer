@@ -354,7 +354,7 @@ func (orch *orchestrator) GetCapabilitiesPrices(sender ethcommon.Address) ([]*ne
 }
 
 func (orch *orchestrator) PriceInfo(sender ethcommon.Address, manifestID ManifestID) (*net.PriceInfo, error) {
-	if orch.node == nil || orch.node.Recipient == nil {
+	if !orch.quotesPrice() {
 		return nil, nil
 	}
 
@@ -374,7 +374,7 @@ func (orch *orchestrator) PriceInfo(sender ethcommon.Address, manifestID Manifes
 }
 
 func (orch *orchestrator) PriceInfoForCaps(sender ethcommon.Address, manifestID ManifestID, caps *net.Capabilities) (*net.PriceInfo, error) {
-	if orch.node == nil || orch.node.Recipient == nil {
+	if !orch.quotesPrice() {
 		return nil, nil
 	}
 
@@ -397,10 +397,16 @@ func (orch *orchestrator) PriceInfoForCaps(sender ethcommon.Address, manifestID 
 	}, nil
 }
 
+// quotesPrice reports whether the orchestrator quotes a price: always with a
+// ticket recipient, and offchain only when started with -pricePerUnit.
+func (orch *orchestrator) quotesPrice() bool {
+	return orch.node != nil && (orch.node.Recipient != nil || orch.node.QuoteOffchainPrice)
+}
+
 // priceInfo returns price per pixel as a fixed point number wrapped in a big.Rat
 func (orch *orchestrator) priceInfo(sender ethcommon.Address, manifestID ManifestID, caps *net.Capabilities) (*big.Rat, error) {
 	// If there is already a fixed price for the given session, use this price
-	if manifestID != "" {
+	if manifestID != "" && orch.node.Balances != nil {
 		fixedPrice := orch.node.Balances.FixedPrice(sender, manifestID)
 		if fixedPrice != nil {
 			return fixedPrice, nil
@@ -447,7 +453,8 @@ func (orch *orchestrator) priceInfo(sender ethcommon.Address, manifestID Manifes
 		}
 	}
 
-	if !orch.node.AutoAdjustPrice {
+	// Without a ticket recipient there is no redemption cost to amortize.
+	if !orch.node.AutoAdjustPrice || orch.node.Recipient == nil {
 		return basePrice, nil
 	}
 
