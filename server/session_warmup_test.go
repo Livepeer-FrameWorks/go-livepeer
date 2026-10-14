@@ -67,8 +67,12 @@ func TestSessionWarmup_AfterFirstSegmentDoesNothing(t *testing.T) {
 
 // The warmed session is the one the first segment uses, and it counts as
 // answered, so the first segment's round trip is a normal transcode sample.
+// The orchestrator's session setup is longer than the round trip of a segment
+// on a gateway under load, so a segment that paid for it shows in the wall
+// clock as well as in the setup wait the orchestrator records.
 func TestSessionWarmup_FirstSegmentReusesTheWarmedSession(t *testing.T) {
-	s, calls := coldSessionStream(t, 300*time.Millisecond, 50*time.Millisecond)
+	const setup = 2 * time.Second
+	s, calls := coldSessionStream(t, setup, 50*time.Millisecond)
 	cxn := s.rtmpConnections["mani"]
 	require.Equal(t, http.StatusAccepted, postSessionWarmup(t, s, "mani"))
 	require.Eventually(t, func() bool {
@@ -78,11 +82,13 @@ func TestSessionWarmup_FirstSegmentReusesTheWarmedSession(t *testing.T) {
 		pool.lock.Lock()
 		defer pool.lock.Unlock()
 		return len(pool.lastSess) == 1 && !pool.lastSess[0].awaitingFirstResult() && len(pool.lastSess[0].SegsInFlight) == 0
-	}, 3*time.Second, 10*time.Millisecond, "the warmed session stays on the reuse list, answered and idle")
+	}, setup+3*time.Second, 10*time.Millisecond, "the warmed session stays on the reuse list, answered and idle")
 	start := time.Now()
 	require.Equal(t, http.StatusOK, pushLiveSegment(t, s, "/live/mani/0.ts"))
-	assert.Less(t, time.Since(start), 300*time.Millisecond, "segment 0 no longer pays for the setup")
+	assert.Less(t, time.Since(start), setup, "segment 0 no longer pays for the setup")
 	assert.EqualValues(t, 2, calls.Load())
+	assert.Equal(t, setup, calls.setupWait(t, 0), "the warm-up started the session setup")
+	assert.Zero(t, calls.setupWait(t, 1), "segment 0 reached the orchestrator after its session was set up")
 }
 
 func TestSessionWarmup_RejectsBadRequests(t *testing.T) {

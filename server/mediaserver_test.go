@@ -64,38 +64,6 @@ func (p *pushWatchdogs) wait() bool {
 // installPushResetTimer makes every push watchdog timer count in pushResetWg.
 var installPushResetTimer sync.Once
 
-var port = 10000
-
-// waitForTCP tries to establish TCP connection for a specified time
-func waitForTCP(waitForTarget time.Duration, uri string) error {
-	var u *url.URL
-	var err error
-	if u, err = url.Parse(uri); err != nil {
-		return err
-	}
-	if u.Port() == "" {
-		switch u.Scheme {
-		case "rtmp":
-			u.Host = u.Host + ":1935"
-		}
-	}
-	dailer := gonet.Dialer{Timeout: 2 * time.Second}
-	started := time.Now()
-	var conn gonet.Conn
-	for {
-		if conn, err = dailer.Dial("tcp", u.Host); err != nil {
-			time.Sleep(10 * time.Millisecond)
-			if time.Since(started) > waitForTarget {
-				return fmt.Errorf("Can't connect to '%s' for more than %s", uri, waitForTarget)
-			}
-			continue
-		}
-		conn.Close()
-		break
-	}
-	return nil
-}
-
 func setupServerWithCancel() (*LivepeerServer, context.CancelFunc) {
 	// wait for any earlier tests to complete
 	pushResetWg.wait()
@@ -119,28 +87,21 @@ func setupServerWithCancel() (*LivepeerServer, context.CancelFunc) {
 		n, _ := core.NewLivepeerNode(nil, "./tmp", nil)
 		// doesn't really starts server at 1938
 		S, _ = NewLivepeerServer(ctx, "127.0.0.1:1938", n, true, "")
-		// rtmpurl := fmt.Sprintf("rtmp://127.0.0.1:%d", port)
-		// S, _ = NewLivepeerServer(rtmpurl, n, true, "")
-		// glog.Errorf("++> rtmp server with port %d", port)
-		// port++
-		// mediaUrl := fmt.Sprintf("http://127.0.0.1:%d", port)
 		// doesn't really starts server at 8938
 		go S.StartMediaServer(ctx, "127.0.0.1:8938")
-		// port++
-		// this one really starts server (without a way to shut it down)
-		cliUrl := fmt.Sprintf("127.0.0.1:%d", port)
-		srv := &http.Server{Addr: cliUrl}
-		go S.StartCliWebserver(srv)
-		port++
-		// sometimes LivepeerServer needs time  to start
-		// esp if this is the only test in the suite being run (eg, via `-run)
-		// time.Sleep(10 * time.Millisecond)
-		// if err := waitForTCP(2*time.Second, rtmpurl); err != nil {
-		// 	panic(err)
-		// }
-		if err := waitForTCP(2*time.Second, "http://"+cliUrl); err != nil {
+		// The CLI handlers are built on this goroutine because building them
+		// swaps the process-wide http.DefaultServeMux; the listener is bound
+		// before serving, on a port no other process can hold.
+		ln, err := gonet.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
 			panic(err)
 		}
+		srv := &http.Server{Handler: S.cliWebServerHandlers(ln.Addr().String())}
+		go srv.Serve(ln)
+		go func() {
+			<-ctx.Done()
+			srv.Close()
+		}()
 	}
 	return S, cancel
 }

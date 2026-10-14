@@ -18,29 +18,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// orchSetupCalls counts the /segment requests of a sessionSetupOrchHandler and
+// records, per request, how long it waited for the session setup to finish.
+type orchSetupCalls struct {
+	atomic.Int32
+	mu         sync.Mutex
+	setupWaits []time.Duration
+}
+
+// setupWait is how long the i-th request (0-based) waited for the session
+// setup to finish before its own work started.
+func (c *orchSetupCalls) setupWait(t *testing.T, i int) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.Greater(t, len(c.setupWaits), i, "request %d did not reach the orchestrator", i)
+	return c.setupWaits[i]
+}
+
 // sessionSetupOrchHandler answers /segment the way an orchestrator answers a
 // stream: the first request it gets starts setting the stream's session up,
 // which takes setup, and every request is answered work after both its
 // arrival and the end of that setup.
-func sessionSetupOrchHandler(t *testing.T, setup, work time.Duration, calls *atomic.Int32) http.HandlerFunc {
+func sessionSetupOrchHandler(t *testing.T, setup, work time.Duration, calls *orchSetupCalls) http.HandlerFunc {
 	tr := &net.TranscodeResult{Result: &net.TranscodeResult_Data{Data: &net.TranscodeData{
 		Segments: []*net.TranscodedSegmentData{{Url: "https://orch/rendition.ts", Pixels: 100}},
 	}}}
 	buf, err := proto.Marshal(tr)
 	require.NoError(t, err)
-	var mu sync.Mutex
 	var setupDone time.Time
 	return func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		mu.Lock()
+		now := time.Now()
+		calls.mu.Lock()
 		if setupDone.IsZero() {
-			setupDone = time.Now().Add(setup)
+			setupDone = now.Add(setup)
 		}
 		at := setupDone
-		mu.Unlock()
-		if now := time.Now(); now.After(at) {
+		if now.After(at) {
 			at = now
 		}
+		calls.setupWaits = append(calls.setupWaits, at.Sub(now))
+		calls.mu.Unlock()
 		at = at.Add(work)
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
@@ -57,7 +75,7 @@ func sessionSetupOrchHandler(t *testing.T, setup, work time.Duration, calls *ato
 
 // coldSessionStream registers the stream "mani" with one orchestrator whose
 // session setup takes setup and whose transcode takes work.
-func coldSessionStream(t *testing.T, setup, work time.Duration) (*LivepeerServer, *atomic.Int32) {
+func coldSessionStream(t *testing.T, setup, work time.Duration) (*LivepeerServer, *orchSetupCalls) {
 	s, cancel := setupServerWithCancel()
 	ctx, stopOrch := context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -65,7 +83,7 @@ func coldSessionStream(t *testing.T, setup, work time.Duration) (*LivepeerServer
 		serverCleanup(s)
 		cancel()
 	})
-	calls := &atomic.Int32{}
+	calls := &orchSetupCalls{}
 	sess := StubBroadcastSession(stubTestTranscoder(ctx, sessionSetupOrchHandler(t, setup, work, calls)))
 	sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
 	sess.Params.ManifestID = "mani"
@@ -187,7 +205,8 @@ func TestSessionWarmup_TimeoutKeepsTheOrchestrator(t *testing.T) {
 	old := sessionWarmupTimeout
 	sessionWarmupTimeout = 600 * time.Millisecond
 	t.Cleanup(func() { sessionWarmupTimeout = old })
-	var slowCalls, otherCalls atomic.Int32
+	var slowCalls orchSetupCalls
+	var otherCalls atomic.Int32
 	setup := sessionSetupOrchHandler(t, 1500*time.Millisecond, 50*time.Millisecond, &slowCalls)
 	s, cxn, slow, _ := twoOrchStream(t, setup, orchResultHandler(t, 0, "", &otherCalls))
 	warmUpNow(t, cxn)
