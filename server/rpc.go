@@ -168,6 +168,10 @@ type BroadcastSession struct {
 	// slowStrikes counts consecutive segments whose round trip exceeded the
 	// segment duration; access under the lock.
 	slowStrikes int
+	// answered is set once the orchestrator returned its first transcode
+	// result for this session; access under the lock. Segments submitted
+	// before then also paid for the orchestrator setting the session up.
+	answered bool
 }
 
 type GetOrchestratorInfoParams struct {
@@ -210,6 +214,23 @@ type ReceivedTranscodeResult struct {
 	Info         *net.OrchestratorInfo
 	LatencyScore float64
 	RemoteIP     string
+	// warmup is set when the segment was submitted before its session
+	// returned a first result, so its round trip includes session setup.
+	warmup bool
+}
+
+// awaitingFirstResult reports whether the orchestrator has not yet returned a
+// transcode result for this session.
+func (bs *BroadcastSession) awaitingFirstResult() bool {
+	bs.lock.RLock()
+	defer bs.lock.RUnlock()
+	return !bs.answered
+}
+
+func (bs *BroadcastSession) markAnswered() {
+	bs.lock.Lock()
+	bs.answered = true
+	bs.lock.Unlock()
 }
 
 type lphttp struct {

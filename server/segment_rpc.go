@@ -457,6 +457,8 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		frameworks.SetRemoteIP(ctx, remoteIPOnly(info.Conn.RemoteAddr().String()))
 	}})
 	submitStart := time.Now()
+	// sess is this submission's own copy of the session.
+	warmup := !sess.answered
 	accountingFW := &fwpb.OrchestratorAttemptAccounting{Version: 1}
 	var (
 		uploadDurFW    time.Duration
@@ -472,6 +474,11 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		// measured nothing about this one, and a non-retryable (input-class)
 		// error says nothing about its speed.
 		if errors.Is(context.Cause(ctx), errHedgeLost) || (retErr != nil && isNonRetryableError(retErr)) {
+			return
+		}
+		// A session's first results include the orchestrator setting the
+		// session up, which is not its transcode speed.
+		if retErr == nil && warmup {
 			return
 		}
 		recordOrchPerf(sess, seg, uploadDurFW, transcodeDurFW, result, retErr)

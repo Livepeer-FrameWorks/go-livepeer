@@ -180,6 +180,8 @@ func (cxn *rtmpConnection) claimSeq(seq uint64, hash segmentFingerprint) error {
 // it may be abandoned by the edge while a re-POST of the same segment joins it.
 // Each caller waits until its own budget's respondBy and then returns
 // errSegmentBudgetExhausted, leaving the transcode to finish for later joiners.
+// A caller whose respondBy passes while the transcode is fetching renditions
+// of a result it already holds waits for it until its own deadline.
 func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *stream.HLSSegment, segPar *core.SegmentParameters, budget segmentBudget) ([]string, error) {
 	hash := segmentRequestFingerprint(seg, segPar)
 	if err := cxn.claimSeq(seg.SeqNo, hash); err != nil {
@@ -205,7 +207,10 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 		}
 		pctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), budget.deadline())
 		defer cancel()
-		urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, segPar)
+		pbudget := budget
+		pbudget.fetching = func(inHand bool) { cxn.setSegFetching(key, inHand) }
+		defer cxn.setSegFetching(key, false)
+		urls, err := processSegment(withSegmentBudget(pctx, pbudget), cxn, seg, segPar)
 		// Only cache a real, non-empty transcode. An empty result (no
 		// orchestrators available, or a view-only stream) must not be cached: a
 		// later re-push of the same segment should re-attempt rather than be
@@ -217,20 +222,50 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 	})
 	respond := time.NewTimer(time.Until(budget.respondBy()))
 	defer respond.Stop()
-	select {
-	case r := <-resc:
-		if r.Shared {
-			clog.Infof(ctx, "Joined in-flight transcode for duplicate push seqNo=%d", seg.SeqNo)
+	holding := false
+	for {
+		select {
+		case r := <-resc:
+			if r.Shared {
+				clog.Infof(ctx, "Joined in-flight transcode for duplicate push seqNo=%d", seg.SeqNo)
+			}
+			if r.Err != nil {
+				return nil, r.Err
+			}
+			urls, _ := r.Val.([]string)
+			return urls, nil
+		case <-respond.C:
+			if !holding && cxn.segFetchingResult(key) {
+				holding = true
+				respond.Reset(time.Until(budget.deadline()))
+				clog.Infof(ctx, "Transcode result in hand at respondBy, waiting for renditions until the deadline seqNo=%d", seg.SeqNo)
+				continue
+			}
+			clog.Warningf(ctx, "Segment budget exhausted before a result seqNo=%d budget=%s", seg.SeqNo, budget.total)
+			return nil, errSegmentBudgetExhausted
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		if r.Err != nil {
-			return nil, r.Err
-		}
-		urls, _ := r.Val.([]string)
-		return urls, nil
-	case <-respond.C:
-		clog.Warningf(ctx, "Segment budget exhausted before a result seqNo=%d budget=%s", seg.SeqNo, budget.total)
-		return nil, errSegmentBudgetExhausted
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
+}
+
+// setSegFetching records whether the in-flight transcode for key holds an
+// orchestrator's result and is fetching its renditions.
+func (cxn *rtmpConnection) setSegFetching(key string, inHand bool) {
+	cxn.segCacheMu.Lock()
+	defer cxn.segCacheMu.Unlock()
+	if !inHand {
+		delete(cxn.segFetching, key)
+		return
+	}
+	if cxn.segFetching == nil {
+		cxn.segFetching = make(map[string]bool)
+	}
+	cxn.segFetching[key] = true
+}
+
+func (cxn *rtmpConnection) segFetchingResult(key string) bool {
+	cxn.segCacheMu.Lock()
+	defer cxn.segCacheMu.Unlock()
+	return cxn.segFetching[key]
 }

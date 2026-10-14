@@ -1414,12 +1414,19 @@ func transcodeSegment(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSS
 		TranscoderUri: sess.Transcoder(),
 		Address:       sess.Address(),
 	}
+	budget, _ := segmentBudgetFromContext(ctx)
+	budget.setFetching(true)
 	urls, err = downloadResults(ctx, cxn, segUsed, sess, res)
+	if err != nil {
+		budget.setFetching(false)
+	}
 	frameworks.SelectedSegmentResult(ctx, sess.Address(), sess.Transcoder(), res.RemoteIP)
 	if pixels, known := frameworksReturnedPixels(res.TranscodeData); err == nil && known {
 		frameworks.SelectedSegmentWork(ctx, pixels, uint32(len(res.TranscodeData.Segments)))
 	}
-	if err == nil {
+	// A round trip that included the orchestrator setting the session up says
+	// nothing about how fast it transcodes the stream's later segments.
+	if err == nil && !res.warmup {
 		cxn.sessManager.recordRoundTrip(ctx, sess, seg, roundTrip)
 	}
 	return urls, info, err
@@ -1432,6 +1439,9 @@ type submission struct {
 	start   time.Time
 	cancel  context.CancelCauseFunc
 	settled bool // its result has been handled
+	// warmup is set when sess had not returned a result when this
+	// submission started.
+	warmup bool
 }
 
 // submitHedged submits seg to primary and, when the segment has a budget and
@@ -1462,7 +1472,7 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 			parentCancel := cancel
 			cancel = func(cause error) { parentCancel(cause); cancelTimeout() }
 		}
-		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel})
+		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel, warmup: sess.awaitingFirstResult()})
 		frameworks.SegmentSubmitted(ctx, sess.Transcoder())
 		submitMultiSession(sctx, sess, segOut, segPar, cxn.nonce, resc)
 		return nil
@@ -1505,6 +1515,16 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 					}
 				}
 				sub.cancel(nil)
+				sub.sess.markAnswered()
+				if sub.warmup {
+					// The round trip includes session setup on the
+					// orchestrator; it must not make the session look
+					// too slow to reuse for the stream's next segment.
+					r.TranscodeResult.warmup = true
+					if thr := bsm.poolFor(sub.sess).latencyScoreThreshold(); r.TranscodeResult.LatencyScore > thr {
+						r.TranscodeResult.LatencyScore = thr
+					}
+				}
 				if hedged {
 					won := sub.sess != primary
 					if won {

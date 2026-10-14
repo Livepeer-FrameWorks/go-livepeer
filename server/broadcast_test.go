@@ -773,6 +773,9 @@ func TestTranscodeSegment_CompleteSession(t *testing.T) {
 
 	sess := StubBroadcastSession(ts.URL)
 	sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	// A session that already answered: the latency score of its first
+	// result, which includes session setup, never triggers a swap.
+	sess.answered = true
 	bsm := bsmWithSessList([]*BroadcastSession{sess})
 	cxn := &rtmpConnection{
 		mid:         core.ManifestID("foo"),

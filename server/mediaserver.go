@@ -116,6 +116,10 @@ type rtmpConnection struct {
 	segSeenOrder      []uint64
 	segReplayFloor    uint64
 	segReplayFloorSet bool
+	// segFetching holds the dedup keys of in-flight transcodes that already
+	// have an orchestrator's result and are fetching its renditions. Only the
+	// processing goroutine of a key sets and clears its entry.
+	segFetching map[string]bool
 }
 
 func (s *LivepeerServer) getActiveRtmpConnectionUnsafe(mid core.ManifestID) (*rtmpConnection, bool) {

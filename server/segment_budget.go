@@ -71,6 +71,17 @@ type segmentBudget struct {
 	total time.Duration
 	// hedges counts hedge submissions; shared by every copy of the budget.
 	hedges *atomic.Int32
+	// fetching, when set, is told whether processing holds an orchestrator's
+	// transcode result and is fetching its renditions.
+	fetching func(inHand bool)
+}
+
+// setFetching reports whether processing holds a transcode result whose
+// renditions it is fetching.
+func (b segmentBudget) setFetching(inHand bool) {
+	if b.fetching != nil {
+		b.fetching(inHand)
+	}
 }
 
 // takeHedge reserves one hedge submission, reporting false once the segment
@@ -127,6 +138,10 @@ func resolveSegmentBudget(params *core.StreamParameters, requestDeadlineMs int, 
 func (b segmentBudget) deadline() time.Time { return b.start.Add(b.total) }
 
 // respondBy is when HandlePush answers 503 if processing has no result yet.
+// segmentResponseMargin before the deadline leaves the edge room to re-POST
+// and join the work. When processing already holds a transcode result and is
+// fetching renditions, a re-POST cannot get it sooner, so HandlePush waits
+// for it until deadline instead.
 func (b segmentBudget) respondBy() time.Time {
 	margin := segmentResponseMargin
 	if margin > b.total/2 {
