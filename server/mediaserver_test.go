@@ -28,7 +28,6 @@ import (
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-tools/drivers"
-	lpmscore "github.com/livepeer/lpms/core"
 	ffmpeg "github.com/livepeer/lpms/ffmpeg"
 	"github.com/livepeer/lpms/segmenter"
 	"github.com/livepeer/lpms/stream"
@@ -87,8 +86,10 @@ func setupServerWithCancel() (*LivepeerServer, context.CancelFunc) {
 		n, _ := core.NewLivepeerNode(nil, "./tmp", nil)
 		// doesn't really starts server at 1938
 		S, _ = NewLivepeerServer(ctx, "127.0.0.1:1938", n, true, "")
-		// doesn't really starts server at 8938
-		go S.StartMediaServer(ctx, "127.0.0.1:8938")
+		// doesn't really starts server at 8938. Setup runs here so the tests'
+		// later writes to package state are ordered after it.
+		S.setupMediaServer(ctx)
+		go S.serveMediaServer(ctx, "127.0.0.1:8938")
 		// The CLI handlers are built on this goroutine because building them
 		// swaps the process-wide http.DefaultServeMux; the listener is bound
 		// before serving, on a port no other process can hold.
@@ -169,9 +170,28 @@ func (d *stubDiscovery) Broadcaster() common.Broadcaster {
 
 type StubSegmenter struct {
 	skip bool
+	// returned, when set, receives once per call as the call returns. The RTMP
+	// handler's segmenter goroutine does no more work after that, so a test
+	// that waits on it can restore package state the goroutine reads.
+	returned chan struct{}
+}
+
+// waitSegmenterReturned waits for n segmenter calls to return.
+func waitSegmenterReturned(t *testing.T, s *StubSegmenter, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-s.returned:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("segmenter call %d of %d did not return", i+1, n)
+		}
+	}
 }
 
 func (s *StubSegmenter) SegmentRTMPToHLS(ctx context.Context, rs stream.RTMPVideoStream, hs stream.HLSVideoStream, segOptions segmenter.SegmenterOptions) error {
+	if s.returned != nil {
+		defer func() { s.returned <- struct{}{} }()
+	}
 	if s.skip {
 		// prevents spamming the console w error logging
 		// when segment can't be submitted successfully
@@ -681,7 +701,8 @@ func TestCreateRTMPStreamHandler(t *testing.T) {
 	s, cancel := setupServerWithCancel()
 	defer serverCleanup(s)
 	defer cancel()
-	s.RTMPSegmenter = &StubSegmenter{skip: true}
+	seg := &StubSegmenter{skip: true, returned: make(chan struct{}, 1)}
+	s.RTMPSegmenter = seg
 	handler := gotRTMPStreamHandler(s)
 	createSid := createRTMPStreamIDHandler(context.TODO(), s)
 	endHandler := endRTMPStreamHandler(s)
@@ -766,6 +787,9 @@ func TestCreateRTMPStreamHandler(t *testing.T) {
 		testManifestIDQueryParam(v)
 	}
 	st.Close()
+	// The handler's segmenter goroutine reads common.RandomIDGenerator, which
+	// the deferred restore writes.
+	waitSegmenterReturned(t, seg, 1)
 }
 
 // Test that when an Auth header is present, it overrides values from the callback URL
@@ -1062,14 +1086,10 @@ func TestGetHLSMasterPlaylistHandler(t *testing.T) {
 	s, cancel := setupServerWithCancel()
 	defer serverCleanup(s)
 	defer cancel()
-	orc := lpmscore.RetryCount
-	srw := lpmscore.SegmenterRetryWait
-	lpmscore.RetryCount = 1
-	lpmscore.SegmenterRetryWait = 0
-	defer func() {
-		lpmscore.RetryCount = orc
-		lpmscore.SegmenterRetryWait = srw
-	}()
+	// The playlist comes from the server's playlist manager, not the segmenter.
+	// A stub segmenter reports when the handler's goroutine is done with it.
+	seg := &StubSegmenter{skip: true, returned: make(chan struct{}, 1)}
+	s.RTMPSegmenter = seg
 	handler := gotRTMPStreamHandler(s)
 
 	vProfile := ffmpeg.P720p30fps16x9
@@ -1108,8 +1128,7 @@ func TestGetHLSMasterPlaylistHandler(t *testing.T) {
 		t.Errorf("Expecting %s, but got: %s", mediaPLName, pl.Variants[0].URI)
 	}
 	strm.Close()
-	// need to wait until SegmentRTMPToHLS loop exits (we don't have a way to force it)
-	time.Sleep(100 * time.Millisecond)
+	waitSegmenterReturned(t, seg, 1)
 }
 
 func TestRegisterConnection(t *testing.T) {

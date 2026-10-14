@@ -213,7 +213,7 @@ func (rwm *RemoteAIWorkerManager) selectWorker(requestID string, pipeline string
 		if _, ok := rwm.liveAIWorkers[worker.stream]; !ok {
 			// Remove the stream session because the worker is no longer live
 			if sessionExists {
-				rwm.completeAIRequest(requestID, pipeline, modelID)
+				rwm.completeAIRequestLocked(requestID, pipeline, modelID)
 			}
 			// worker does not exist in table; remove and retry
 			rwm.remoteAIWorkers = removeFromRemoteWorkers(worker, rwm.remoteAIWorkers)
@@ -235,6 +235,8 @@ func (rwm *RemoteAIWorkerManager) workerHasCapacity(pipeline, modelID string) bo
 	if err != nil {
 		return false
 	}
+	rwm.RWmutex.Lock()
+	defer rwm.RWmutex.Unlock()
 	for _, worker := range rwm.remoteAIWorkers {
 		rw, hasCap := worker.capabilities.constraints.perCapability[cap]
 		if hasCap {
@@ -255,7 +257,11 @@ func (rwm *RemoteAIWorkerManager) workerHasCapacity(pipeline, modelID string) bo
 func (rwm *RemoteAIWorkerManager) completeAIRequest(requestID, pipeline, modelID string) {
 	rwm.RWmutex.Lock()
 	defer rwm.RWmutex.Unlock()
+	rwm.completeAIRequestLocked(requestID, pipeline, modelID)
+}
 
+// completeAIRequestLocked returns the request's reserved capacity; the caller holds RWmutex.
+func (rwm *RemoteAIWorkerManager) completeAIRequestLocked(requestID, pipeline, modelID string) {
 	worker, ok := rwm.requestSessions[requestID]
 	if !ok {
 		return

@@ -283,6 +283,14 @@ func NewLivepeerServer(ctx context.Context, rtmpAddr string, lpNode *core.Livepe
 
 // StartMediaServer starts the LPMS server
 func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) error {
+	s.setupMediaServer(ctx)
+	return s.serveMediaServer(ctx, httpAddr)
+}
+
+// setupMediaServer stores ctx and registers the media handlers. It returns
+// before anything is served, so a caller that runs serveMediaServer on another
+// goroutine has the server state in place before the first request.
+func (s *LivepeerServer) setupMediaServer(ctx context.Context) {
 	glog.V(common.SHORT).Infof("Transcode Job Type: %v", BroadcastJobVideoProfiles)
 
 	// Store ctx to later use as cancel signal for watchdog goroutine
@@ -297,7 +305,10 @@ func (s *LivepeerServer) StartMediaServer(ctx context.Context, httpAddr string) 
 
 	//LPMS handler for handling HLS video play
 	s.LPMS.HandleHLSPlay(getHLSMasterPlaylistHandler(s), getHLSMediaPlaylistHandler(s), getHLSSegmentHandler(s))
+}
 
+// serveMediaServer runs the LPMS and HTTP servers until ctx ends or one fails.
+func (s *LivepeerServer) serveMediaServer(ctx context.Context, httpAddr string) error {
 	//Start the LPMS server
 	lpmsCtx, cancel := context.WithCancel(ctx)
 

@@ -890,6 +890,9 @@ func (n *LivepeerNode) transcodeSegmentLoop(logCtx context.Context, md *SegTrans
 	n.StorageConfigs[md.AuthToken.SessionId] = &storageConfig
 	n.storageMutex.Unlock()
 	loopTimeout := transcodeLoopTimeout
+	// The loop outlives the request that started it; it keeps the session ID,
+	// not the caller's metadata, which the caller is free to reuse.
+	sessionID := md.AuthToken.SessionId
 	go func() {
 		for {
 			// XXX make context timeout configurable
@@ -898,7 +901,7 @@ func (n *LivepeerNode) transcodeSegmentLoop(logCtx context.Context, md *SegTrans
 			case <-ctx.Done():
 				cancel()
 				clog.V(common.DEBUG).Infof(logCtx, "Segment loop timed out; closing ")
-				n.endSession(md.AuthToken.SessionId, segChan, logCtx)
+				n.endSession(sessionID, segChan, logCtx)
 				// segChan is closed now: either by the call above or by an earlier
 				// end, which is the only way another channel could be registered for
 				// this session ID. Segments queued after the timeout fired have no

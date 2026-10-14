@@ -2021,6 +2021,10 @@ func newScopeHTTP(t *testing.T) *lphttp {
 	require.NoError(t, err)
 	node.Eth = &eth.StubClient{}
 	node.Capabilities = createStubAIWorkerCapabilitiesForPipelineModelId("live-video-to-video", "scope")
+	// With a zero interval every events segment bills the time since session
+	// start, so the test's own events close could end a paid session before
+	// the test closes it. Tests of recurring accounting set their interval.
+	node.LivePaymentInterval = time.Hour
 	orch := newStubOrchestrator()
 	orch.ticketParams = defaultTicketParams()
 	lp := &lphttp{

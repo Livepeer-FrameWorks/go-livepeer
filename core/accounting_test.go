@@ -228,6 +228,26 @@ func TestFixedPrice(t *testing.T) {
 	assert.Nil(t, b.FixedPrice(id2))
 }
 
+func TestBalances_BalanceIsSnapshot(t *testing.T) {
+	b := NewBalances(5 * time.Second)
+	mid := ManifestID("mid")
+	b.Credit(mid, big.NewRat(100, 1))
+	bal := b.Balance(mid)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.Credit(mid, big.NewRat(50, 1))
+		b.Debit(mid, big.NewRat(20, 1))
+	}()
+	// The returned value is a copy, so reading it while the balance changes is safe.
+	assert.Equal(t, "100", bal.FloatString(0))
+	<-done
+
+	assert.Equal(t, "100", bal.FloatString(0))
+	assert.Zero(t, b.Balance(mid).Cmp(big.NewRat(130, 1)))
+}
+
 func TestBalancesCleanup(t *testing.T) {
 	b := NewBalances(5 * time.Second)
 	assert := assert.New(t)

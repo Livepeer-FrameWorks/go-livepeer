@@ -216,7 +216,9 @@ func (b *Balances) Balance(id ManifestID) *big.Rat {
 	if b.balances[id] == nil {
 		return nil
 	}
-	return b.balances[id].amount
+	// Credit and Debit update the stored amount in place under the lock, so
+	// callers get a copy they can read after the lock is released.
+	return new(big.Rat).Set(b.balances[id].amount)
 }
 
 // FixedPrice retrieves the price fixed the given session
@@ -241,12 +243,12 @@ func (b *Balances) SetFixedPrice(id ManifestID, fixedPrice *big.Rat) {
 }
 
 func (b *Balances) cleanup() {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
 	for id, balance := range b.balances {
-		b.mtx.Lock()
-		if int64(time.Since(balance.lastUpdate)) > int64(b.ttl) {
+		if time.Since(balance.lastUpdate) > b.ttl {
 			delete(b.balances, id)
 		}
-		b.mtx.Unlock()
 	}
 }
 

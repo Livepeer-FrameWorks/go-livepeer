@@ -52,7 +52,7 @@ func compareAndUpdateBalance(node sharedBalanceNode, addr ethcommon.Address, id 
 
 	var resetToZero bool
 	if expected.Sign() == 0 {
-		lpNode.Balances.Debit(addr, core.ManifestID(id), current)
+		lpNode.Balances.Reserve(addr, core.ManifestID(id))
 
 		resetToZero = true
 	}

@@ -14,33 +14,15 @@ PKGS=$(go list ./... | grep -v 'test/e2e')
 gotestsum ${RERUN} --junitfile test-results/unit.xml \
   --packages="${PKGS}" -- -coverprofile cover.out
 
-# Be more strict with load balancer tests: run with race detector enabled
-gotestsum ${RERUN} --junitfile test-results/core-lb-race.xml \
-  --packages="./core" -- -race -run 'LB_'
-
-# Be more strict with nvidia tests: run with race detector enabled
-gotestsum ${RERUN} --junitfile test-results/core-nvidia-race.xml \
-  --packages="./core" -- -race -run 'Nvidia_'
-
-gotestsum ${RERUN} --junitfile test-results/core-capabilities-race.xml \
-  --packages="./core" -- -race -run 'Capabilities_'
+# Whole-package race lanes run without reruns: a race that a retry hides is
+# still a race.
+for pkg in core server discovery media; do
+  gotestsum --junitfile "test-results/${pkg}-race.xml" \
+    --packages="./${pkg}" -- -race -count=1
+done
 
 # Be more strict with live runner tests: run with race detector enabled
 go test ./ai/runner -race
-
-# Be more strict with discovery tests: run with race detector enabled
-gotestsum ${RERUN} --junitfile test-results/discovery-race.xml \
-  --packages="./discovery" -- -race
-
-# Be more strict with HTTP push tests: run with race detector enabled
-gotestsum ${RERUN} --junitfile test-results/server-selectsession-race.xml \
-  --packages="./server" -- -race -run 'TestSelectSession_'
-
-gotestsum ${RERUN} --junitfile test-results/server-registerconnection-race.xml \
-  --packages="./server" -- -race -run 'RegisterConnection'
-
-gotestsum ${RERUN} --junitfile test-results/media-race.xml \
-  --packages="./media" -- -race
 
 gotestsum ${RERUN} --junitfile test-results/trickle-race.xml \
   --packages="./trickle" -- -race -timeout 10s

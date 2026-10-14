@@ -44,21 +44,32 @@ func TestServeTranscoder(t *testing.T) {
 	// test that a transcoder was created
 	capabilities := NewCapabilities(DefaultCapabilities(), []Capability{})
 	go n.serveTranscoder(strm, 5, capabilities.ToNetCapabilities())
-	time.Sleep(1 * time.Second)
-
-	tc, ok := n.TranscoderManager.liveTranscoders[strm]
-	if !ok {
-		t.Error("Unexpected transcoder type")
-	}
+	tc := waitForTranscoder(t, n.TranscoderManager, strm, true)
 
 	// test shutdown
 	tc.eof <- struct{}{}
-	time.Sleep(1 * time.Second)
 
 	// stream should be removed
-	_, ok = n.TranscoderManager.liveTranscoders[strm]
-	if ok {
-		t.Error("Unexpected transcoder presence")
+	waitForTranscoder(t, n.TranscoderManager, strm, false)
+}
+
+// waitForTranscoder polls the manager under its lock until the registration of
+// strm matches live. Reading through the lock orders the test's later reads of
+// manager state after the Manage goroutine published or removed the transcoder.
+func waitForTranscoder(t *testing.T, m *RemoteTranscoderManager, strm net.Transcoder_RegisterTranscoderServer, live bool) *RemoteTranscoder {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.RTmutex.Lock()
+		tc := m.liveTranscoders[strm]
+		m.RTmutex.Unlock()
+		if (tc != nil) == live {
+			return tc
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for transcoder live=%v", live)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -210,7 +221,7 @@ func TestManageTranscoders(t *testing.T) {
 	// test that transcoder is added to liveTranscoders and remoteTranscoders
 	wg1 := newWg(1)
 	go func() { m.Manage(strm, 5, capabilities.ToNetCapabilities()); wg1.Done() }()
-	time.Sleep(1 * time.Millisecond) // allow the manager to activate
+	waitForTranscoder(t, m, strm, true)
 
 	assert.NotNil(m.liveTranscoders[strm])
 	assert.Len(m.liveTranscoders, 1)
@@ -224,7 +235,7 @@ func TestManageTranscoders(t *testing.T) {
 	// test that additional transcoder is added to liveTranscoders and remoteTranscoders
 	wg2 := newWg(1)
 	go func() { m.Manage(strm2, 4, capabilities.ToNetCapabilities()); wg2.Done() }()
-	time.Sleep(1 * time.Millisecond) // allow the manager to activate
+	waitForTranscoder(t, m, strm2, true)
 
 	assert.NotNil(m.liveTranscoders[strm])
 	assert.NotNil(m.liveTranscoders[strm2])
@@ -270,9 +281,9 @@ func TestSelectTranscoder(t *testing.T) {
 	// register transcoders, which adds transcoder to liveTranscoders and remoteTranscoders
 	wg := newWg(1)
 	go func() { m.Manage(strm, 1, capabilities.ToNetCapabilities()) }()
-	time.Sleep(1 * time.Millisecond) // allow time for first stream to register
+	waitForTranscoder(t, m, strm, true)
 	go func() { m.Manage(strm2, 1, richCapabilities.ToNetCapabilities()); wg.Done() }()
-	time.Sleep(1 * time.Millisecond) // allow time for second stream to register e for third stream to register
+	waitForTranscoder(t, m, strm2, true)
 
 	assert.NotNil(m.liveTranscoders[strm])
 	assert.NotNil(m.liveTranscoders[strm2])
@@ -380,8 +391,7 @@ func TestCompleteStreamSession(t *testing.T) {
 
 	// register transcoders
 	go func() { m.Manage(strm, 1, capabilities.ToNetCapabilities()) }()
-	time.Sleep(1 * time.Millisecond) // allow time for first stream to register
-	t1 := m.liveTranscoders[strm]
+	t1 := waitForTranscoder(t, m, strm, true)
 
 	// selectTranscoder and assert that session is added
 	m.selectTranscoder(testSessionId, nil)
@@ -466,7 +476,7 @@ func TestTranscoderManagerTranscoding(t *testing.T) {
 
 	wg := newWg(1)
 	go func() { m.Manage(s, 5, capabilities.ToNetCapabilities()); wg.Done() }()
-	time.Sleep(1 * time.Millisecond)
+	waitForTranscoder(t, m, s, true)
 
 	assert.Len(m.remoteTranscoders, 1) // sanity
 	assert.Len(m.liveTranscoders, 1)
@@ -507,7 +517,7 @@ func TestTranscoderManagerTranscoding(t *testing.T) {
 	// fatal error should not retry
 	wg.Add(1)
 	go func() { m.Manage(s, 5, capabilities.ToNetCapabilities()); wg.Done() }()
-	time.Sleep(1 * time.Millisecond)
+	waitForTranscoder(t, m, s, true)
 
 	assert.Len(m.remoteTranscoders, 1) // sanity check
 	assert.Len(m.liveTranscoders, 1)
