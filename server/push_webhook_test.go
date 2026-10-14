@@ -16,7 +16,7 @@ func TestPush_WebhookRequestURL(t *testing.T) {
 	assert := assert.New(t)
 
 	// wait for any earlier tests to complete
-	assert.True(wgWait(&pushResetWg), "timed out waiting for earlier tests")
+	assert.True(pushResetWg.wait(), "timed out waiting for earlier tests")
 
 	s, cancel := setupServerWithCancel()
 	defer serverCleanup(s)

@@ -149,7 +149,7 @@ func (s *LivepeerServer) HandleSessionWarmup(w http.ResponseWriter, r *http.Requ
 	ctx = clog.AddManifestID(ctx, string(mid))
 	ctx = clog.AddNonce(ctx, cxn.nonce)
 
-	if !cxn.claimSessionUse() {
+	if !cxn.claimSessionUse(false) {
 		clog.V(common.DEBUG).Infof(ctx, "Session warm-up skipped: the stream's sessions are already in use")
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -198,18 +198,45 @@ func sessionWarmupDuration(header string, fps float32) time.Duration {
 // session up before the stream's first segment arrives. The session stays
 // first on the reuse list, marked as answered, so the first segment uses it
 // and its round trip counts as the orchestrator's transcode speed.
+//
+// A failed warm-up is handled as a failed segment attempt is: unless the
+// warm-up ran out of time, its orchestrator is suspended and removed, so the
+// stream's first segment is not sent to it. The keyframe then goes to one more
+// session that is already available, within the same sessionWarmupTimeout and
+// only while no segment of the stream has arrived.
 func (cxn *rtmpConnection) warmSession(ctx context.Context, seg *stream.HLSSegment) {
 	ctx, cancel := context.WithTimeout(ctx, sessionWarmupTimeout)
 	defer cancel()
 	start := time.Now()
+	for attempt := 1; attempt <= maxSessionWarmupAttempts; attempt++ {
+		if attempt > 1 && cxn.segmentArrived() {
+			// The segment's own attempts choose its orchestrator; a second
+			// warm-up would only pay for a keyframe nothing waits on.
+			clog.Infof(ctx, "Session warm-up not moved to another orchestrator: a segment of the stream arrived")
+			return
+		}
+		if !cxn.warmOneSession(ctx, seg, start, attempt > 1) {
+			return
+		}
+	}
+}
+
+// maxSessionWarmupAttempts bounds the orchestrators one warm-up submits its
+// keyframe to.
+const maxSessionWarmupAttempts = 2
+
+// warmOneSession submits seg to one orchestrator session and reports whether
+// that orchestrator failed it and was suspended, so that another session may
+// be warmed. A retry takes only a session already available.
+func (cxn *rtmpConnection) warmOneSession(ctx context.Context, seg *stream.HLSSegment, start time.Time, retry bool) bool {
 	bsm := cxn.sessManager
 	sessions := bsm.selectSessions(ctx)
-	if len(sessions) == 0 && bsm.hasOrchestratorPool() {
+	if len(sessions) == 0 && !retry && bsm.hasOrchestratorPool() {
 		sessions = bsm.waitForSessions(ctx)
 	}
 	if len(sessions) == 0 {
 		clog.Infof(ctx, "Session warm-up found no orchestrator session took=%s", time.Since(start))
-		return
+		return false
 	}
 	sess := sessions[0]
 	ext, err := common.ProfileFormatExtension(cxn.profile.Format)
@@ -220,22 +247,25 @@ func (cxn *rtmpConnection) warmSession(ctx context.Context, seg *stream.HLSSegme
 	if err != nil {
 		// prepareForTranscoding suspended and removed the orchestrator.
 		clog.Warningf(ctx, "Session warm-up could not prepare orch=%s err=%q", sess.Transcoder(), err)
-		return
+		return ctx.Err() == nil
 	}
 	// A segment that arrives while the orchestrator still sets the session up
 	// joins this session instead of moving to another, cold, orchestrator.
 	sess.pushInFlight(sessionWarmupTimeout)
 	res, err := SubmitSegment(withSessionWarmup(ctx), sess.Clone(), segOut, nil, cxn.nonce, false)
 	if err != nil {
-		if ctx.Err() != nil || isNonRetryableError(err) {
-			// The warm-up ran out of time or its keyframe was refused; neither
-			// says the orchestrator cannot serve the stream's segments.
-			bsm.releaseSession(sess)
-		} else {
-			bsm.suspendAndRemoveOrch(ctx, sess, err)
-		}
 		clog.Warningf(ctx, "Session warm-up failed orch=%s took=%s err=%q", sess.Transcoder(), time.Since(start), err)
-		return
+		if ctx.Err() != nil {
+			// The warm-up ran out of time, which says nothing about the
+			// orchestrator: the session setup it started may still finish.
+			bsm.releaseSession(sess)
+			return false
+		}
+		// As for a segment attempt, an error the orchestrator returned,
+		// non-retryable ones included, is the orchestrator's: one keyframe
+		// cannot show that the input is at fault.
+		bsm.suspendAndRemoveOrch(ctx, sess, err)
+		return true
 	}
 	sess.markAnswered()
 	// The round trip was session setup; it must not make the session look too
@@ -246,4 +276,5 @@ func (cxn *rtmpConnection) warmSession(ctx context.Context, seg *stream.HLSSegme
 	updateSession(sess, res)
 	bsm.completeSession(ctx, sess, false)
 	clog.Infof(ctx, "Session warm-up done orch=%s took=%s", sess.Transcoder(), time.Since(start))
+	return false
 }

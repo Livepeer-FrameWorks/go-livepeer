@@ -121,18 +121,32 @@ type rtmpConnection struct {
 	// processing goroutine of a key sets and clears its entry.
 	segFetching map[string]bool
 	// sessionUsed is set once a session warm-up or a segment used the
-	// stream's orchestrator sessions; guarded by mu.
-	sessionUsed bool
+	// stream's orchestrator sessions; segmentUsedSessions once a segment did.
+	// Both are guarded by mu.
+	sessionUsed         bool
+	segmentUsedSessions bool
 }
 
-// claimSessionUse records that a session warm-up or a segment is using the
-// stream's orchestrator sessions, and reports whether nothing did before.
-func (cxn *rtmpConnection) claimSessionUse() bool {
+// claimSessionUse records that a session warm-up or, when bySegment is set, a
+// segment is using the stream's orchestrator sessions, and reports whether
+// nothing did before.
+func (cxn *rtmpConnection) claimSessionUse(bySegment bool) bool {
 	cxn.mu.Lock()
 	defer cxn.mu.Unlock()
 	first := !cxn.sessionUsed
 	cxn.sessionUsed = true
+	if bySegment {
+		cxn.segmentUsedSessions = true
+	}
 	return first
+}
+
+// segmentArrived reports whether a segment of the stream used its
+// orchestrator sessions.
+func (cxn *rtmpConnection) segmentArrived() bool {
+	cxn.mu.Lock()
+	defer cxn.mu.Unlock()
+	return cxn.segmentUsedSessions
 }
 
 func (s *LivepeerServer) getActiveRtmpConnectionUnsafe(mid core.ManifestID) (*rtmpConnection, bool) {
@@ -1086,7 +1100,7 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx = clog.AddManifestID(ctx, string(mid))
 	// A session warm-up arriving after this segment has nothing left to warm.
-	cxn.claimSessionUse()
+	cxn.claimSessionUse(true)
 	defer func(now time.Time) {
 		clog.Infof(ctx, "Finished push request at url=%s ua=%s addr=%s bytes=%d dur=%s resolution=%s took=%s", r.URL.String(), r.UserAgent(), r.RemoteAddr, len(body),
 			r.Header.Get("Content-Duration"), r.Header.Get("Content-Resolution"), time.Since(now))

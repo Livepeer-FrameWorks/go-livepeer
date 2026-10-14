@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,7 +37,32 @@ import (
 
 // var S *LivepeerServer
 
-var pushResetWg sync.WaitGroup // needed to synchronize exits from HTTP push
+// pushResetWg counts the HTTP push watchdog timers in flight, so a test can
+// wait for the pushes of earlier tests to exit.
+var pushResetWg pushWatchdogs
+
+// pushWatchdogs is a counter rather than a sync.WaitGroup: a push's watchdog
+// goroutine takes its first timer when it starts, which can be after its
+// request returned, so the count rises from zero while a later test waits.
+type pushWatchdogs struct{ n atomic.Int64 }
+
+func (p *pushWatchdogs) Add(delta int) { p.n.Add(int64(delta)) }
+func (p *pushWatchdogs) Done()         { p.n.Add(-1) }
+
+// wait reports whether no watchdog is in flight within a second.
+func (p *pushWatchdogs) wait() bool {
+	deadline := time.Now().Add(time.Second)
+	for p.n.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// installPushResetTimer makes every push watchdog timer count in pushResetWg.
+var installPushResetTimer sync.Once
 
 var port = 10000
 
@@ -72,20 +98,24 @@ func waitForTCP(waitForTarget time.Duration, uri string) error {
 
 func setupServerWithCancel() (*LivepeerServer, context.CancelFunc) {
 	// wait for any earlier tests to complete
-	wgWait(&pushResetWg)
+	pushResetWg.wait()
 	drivers.NodeStorage = drivers.NewMemoryDriver(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	var S *LivepeerServer
 	if S == nil {
-		httpPushResetTimer = func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(context.Background())
-			pushResetWg.Add(1)
-			wrapCancel := func() {
-				cancel()
-				pushResetWg.Done()
+		// Assigned once: a watchdog goroutine of an earlier test's push may
+		// still be reading it.
+		installPushResetTimer.Do(func() {
+			httpPushResetTimer = func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				pushResetWg.Add(1)
+				wrapCancel := func() {
+					cancel()
+					pushResetWg.Done()
+				}
+				return ctx, wrapCancel
 			}
-			return ctx, wrapCancel
-		}
+		})
 		n, _ := core.NewLivepeerNode(nil, "./tmp", nil)
 		// doesn't really starts server at 1938
 		S, _ = NewLivepeerServer(ctx, "127.0.0.1:1938", n, true, "")

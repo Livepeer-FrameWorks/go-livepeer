@@ -13,6 +13,8 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/lpms/ffmpeg"
+	"github.com/livepeer/lpms/stream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -117,4 +119,101 @@ func TestPush_SessionWarmupLetsColdFirstSegmentMakeItsBudget(t *testing.T) {
 	start := time.Now()
 	require.Equal(t, http.StatusOK, pushLiveSegment(t, s, "/live/mani/0.ts"), "took=%s", time.Since(start))
 	require.EqualValues(t, 2, calls.Load(), "the warm-up and segment 0 each reached the orchestrator once")
+}
+
+// twoOrchStream registers the stream "mani" with two orchestrators; the
+// session selector offers first first.
+func twoOrchStream(t *testing.T, first, second http.HandlerFunc) (*LivepeerServer, *rtmpConnection, *BroadcastSession, *BroadcastSession) {
+	s, cancel := setupServerWithCancel()
+	ctx, stopOrch := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		stopOrch()
+		serverCleanup(s)
+		cancel()
+	})
+	var sessions []*BroadcastSession
+	for _, h := range []http.HandlerFunc{first, second} {
+		sess := StubBroadcastSession(stubTestTranscoder(ctx, h))
+		sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+		sess.Params.ManifestID = "mani"
+		sessions = append(sessions, sess)
+	}
+	// LIFOSelector pops the last added session first.
+	cxn := budgetTestConnection(bsmWithSessListExt([]*BroadcastSession{sessions[1], sessions[0]}, nil, true))
+	cxn.mid = "mani"
+	cxn.params.ManifestID = "mani"
+	slowRenditionDownload(t, 0)
+	s.connectionLock.Lock()
+	s.rtmpConnections["mani"] = cxn
+	s.connectionLock.Unlock()
+	return s, cxn, sessions[0], sessions[1]
+}
+
+// warmUpNow runs the stream's session warm-up to completion.
+func warmUpNow(t *testing.T, cxn *rtmpConnection) {
+	require.True(t, cxn.claimSessionUse(false))
+	cxn.warmSession(context.Background(), &stream.HLSSegment{Data: validPushSegment(t), SeqNo: sessionWarmupSeqNo, Duration: 0.04})
+}
+
+// An orchestrator that refuses the warm-up keyframe with an error the segment
+// path suspends it for is suspended by the warm-up too, another orchestrator
+// is warmed, and the stream's first segment goes there.
+func TestSessionWarmup_OrchestratorFaultMovesFirstSegmentElsewhere(t *testing.T) {
+	var badCalls, goodCalls atomic.Int32
+	s, cxn, bad, good := twoOrchStream(t,
+		orchResultHandler(t, 0, "Invalid argument", &badCalls),
+		orchResultHandler(t, 0, "", &goodCalls))
+	warmUpNow(t, cxn)
+	require.EqualValues(t, 1, badCalls.Load())
+
+	pool := cxn.sessManager.trustedPool
+	assert.NotContains(t, pool.sessMap, bad.Transcoder(), "the faulting orchestrator leaves the pool")
+	assert.Greater(t, pool.sus.Suspended(bad.Transcoder()), 0, "the faulting orchestrator is suspended")
+	assert.EqualValues(t, 1, goodCalls.Load(), "the warm-up moves on to the other orchestrator")
+	if assert.Len(t, pool.lastSess, 1) {
+		assert.Same(t, good, pool.lastSess[0], "the other orchestrator's session is the one the first segment reuses")
+	}
+
+	require.Equal(t, http.StatusOK, pushLiveSegment(t, s, "/live/mani/0.ts"))
+	require.Equal(t, http.StatusOK, pushLiveSegment(t, s, "/live/mani/1.ts"))
+	assert.EqualValues(t, 1, badCalls.Load(), "no segment is sent to the orchestrator whose warm-up failed")
+	assert.EqualValues(t, 3, goodCalls.Load())
+}
+
+// A warm-up that only runs out of time says nothing about the orchestrator:
+// its session is kept, nothing else is warmed, and the first segment still
+// goes to it.
+func TestSessionWarmup_TimeoutKeepsTheOrchestrator(t *testing.T) {
+	old := sessionWarmupTimeout
+	sessionWarmupTimeout = 600 * time.Millisecond
+	t.Cleanup(func() { sessionWarmupTimeout = old })
+	var slowCalls, otherCalls atomic.Int32
+	setup := sessionSetupOrchHandler(t, 1500*time.Millisecond, 50*time.Millisecond, &slowCalls)
+	s, cxn, slow, _ := twoOrchStream(t, setup, orchResultHandler(t, 0, "", &otherCalls))
+	warmUpNow(t, cxn)
+	require.EqualValues(t, 1, slowCalls.Load())
+
+	pool := cxn.sessManager.trustedPool
+	assert.Contains(t, pool.sessMap, slow.Transcoder(), "a timed-out warm-up keeps the orchestrator")
+	assert.Zero(t, pool.sus.Suspended(slow.Transcoder()), "a timed-out warm-up does not suspend the orchestrator")
+	assert.Zero(t, otherCalls.Load(), "a timed-out warm-up warms nothing else")
+
+	require.Equal(t, http.StatusOK, pushLiveSegment(t, s, "/live/mani/0.ts"))
+	assert.EqualValues(t, 2, slowCalls.Load(), "the first segment goes to the orchestrator the warm-up timed out on")
+	assert.Zero(t, otherCalls.Load())
+}
+
+// Once a segment of the stream arrived, a failed warm-up warms no other
+// orchestrator: the segment's own attempts choose where it goes.
+func TestSessionWarmup_FaultAfterFirstSegmentWarmsNothingElse(t *testing.T) {
+	var badCalls, goodCalls atomic.Int32
+	_, cxn, bad, _ := twoOrchStream(t,
+		orchResultHandler(t, 0, "Invalid argument", &badCalls),
+		orchResultHandler(t, 0, "", &goodCalls))
+	require.True(t, cxn.claimSessionUse(false))
+	cxn.claimSessionUse(true)
+	cxn.warmSession(context.Background(), &stream.HLSSegment{Data: validPushSegment(t), SeqNo: sessionWarmupSeqNo, Duration: 0.04})
+	assert.EqualValues(t, 1, badCalls.Load())
+	assert.Zero(t, goodCalls.Load())
+	assert.Greater(t, cxn.sessManager.trustedPool.sus.Suspended(bad.Transcoder()), 0)
 }

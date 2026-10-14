@@ -111,7 +111,7 @@ func TestSessionWarmup_RejectsBadRequests(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 	assert.Zero(t, calls.Load())
-	assert.True(t, s.rtmpConnections["mani"].claimSessionUse(), "a refused warm-up leaves the stream unwarmed")
+	assert.True(t, s.rtmpConnections["mani"].claimSessionUse(false), "a refused warm-up leaves the stream unwarmed")
 }
 
 // A warm-up is authorized like a segment: the auth webhook registers a new
