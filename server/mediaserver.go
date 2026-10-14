@@ -120,6 +120,19 @@ type rtmpConnection struct {
 	// have an orchestrator's result and are fetching its renditions. Only the
 	// processing goroutine of a key sets and clears its entry.
 	segFetching map[string]bool
+	// sessionUsed is set once a session warm-up or a segment used the
+	// stream's orchestrator sessions; guarded by mu.
+	sessionUsed bool
+}
+
+// claimSessionUse records that a session warm-up or a segment is using the
+// stream's orchestrator sessions, and reports whether nothing did before.
+func (cxn *rtmpConnection) claimSessionUse() bool {
+	cxn.mu.Lock()
+	defer cxn.mu.Unlock()
+	first := !cxn.sessionUsed
+	cxn.sessionUsed = true
+	return first
 }
 
 func (s *LivepeerServer) getActiveRtmpConnectionUnsafe(mid core.ManifestID) (*rtmpConnection, bool) {
@@ -789,6 +802,152 @@ func getRTMPStreamHandler(s *LivepeerServer) func(url *url.URL) (stream.RTMPVide
 
 type BreakOperation bool
 
+// lookupHTTPIngest returns the active connection of the HTTP-ingest stream
+// mid, the internal manifest ID it runs under, and whether it exists.
+func (s *LivepeerServer) lookupHTTPIngest(mid core.ManifestID) (*rtmpConnection, core.ManifestID, bool) {
+	s.connectionLock.RLock()
+	defer s.connectionLock.RUnlock()
+	if intmid, exists := s.internalManifests[mid]; exists {
+		mid = intmid
+	}
+	cxn, exists := s.getActiveRtmpConnectionUnsafe(mid)
+	return cxn, mid, exists
+}
+
+// ingestAuthorizationMatches reports whether a request carrying ingestConfig
+// from remoteAddr may use cxn: with an auth webhook, only the job token and
+// source address that authorized the stream may.
+func ingestAuthorizationMatches(cxn *rtmpConnection, ingestConfig *ingestJobConfig, remoteAddr string) bool {
+	if AuthWebhookURL == nil {
+		return true
+	}
+	if ingestConfig == nil {
+		return false
+	}
+	tokenHash := sha256.Sum256([]byte(ingestConfig.JobToken))
+	return tokenHash == cxn.params.IngestJobTokenHash && remoteAddr == cxn.params.AuthorizedSourceIP
+}
+
+// registerHTTPIngest authorizes the new HTTP-ingest stream mid through the
+// auth webhook and registers its connection, or returns the connection a
+// concurrent request registered first. It returns the connection, the internal
+// manifest ID it runs under, and on failure the HTTP status to answer with.
+func (s *LivepeerServer) registerHTTPIngest(ctx context.Context, reqURL *url.URL, mid core.ManifestID, ingestConfig *ingestJobConfig, remoteAddr string,
+	mediaFormat ffmpeg.MediaFormatInfo, vcodec *ffmpeg.VideoCodec, format ffmpeg.Format, segPar *core.SegmentParameters) (*rtmpConnection, core.ManifestID, int, error) {
+	source := ingestSource{
+		Width:       mediaFormat.Width,
+		Height:      mediaFormat.Height,
+		FPS:         float64(mediaFormat.FPS),
+		Codec:       mediaFormat.Vcodec,
+		PixelFormat: pixelFormatName(mediaFormat.PixFormat),
+	}
+	appData, err := (createHTTPPushStreamIDHandler(ctx, s, &httpPushAuthContext{
+		config: ingestConfig, remoteIP: remoteAddr, source: source,
+	}))(reqURL)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			return nil, mid, http.StatusForbidden, fmt.Errorf("Could not create stream ID: url=%s", reqURL)
+		}
+		return nil, mid, http.StatusInternalServerError, fmt.Errorf("Could not create stream ID: url=%s", reqURL)
+	}
+	params := streamParams(appData)
+	params.Resolution = fmt.Sprintf("%dx%d", mediaFormat.Width, mediaFormat.Height)
+	params.Format = format
+	s.connectionLock.RLock()
+	_, cxnExists := s.getActiveRtmpConnectionUnsafe(params.ManifestID)
+	if mid != params.ManifestID && cxnExists && s.internalManifests[mid] == "" {
+		// Pre-existing connection found for this new stream with the same underlying manifestID
+		var oldStreamID core.ManifestID
+		for k, v := range s.internalManifests {
+			if v == params.ManifestID {
+				oldStreamID = k
+				break
+			}
+		}
+		s.connectionLock.RUnlock()
+		if oldStreamID != "" && mid != oldStreamID {
+			// Close the old connection, and open a new one
+			// TODO try to re-use old HLS playlist?
+			clog.Warningf(ctx, "Ending streamID=%v as new streamID=%s with same manifestID=%s has arrived",
+				oldStreamID, mid, params.ManifestID)
+			removeRTMPStream(context.TODO(), s, oldStreamID)
+		}
+	} else {
+		s.connectionLock.RUnlock()
+	}
+	st := stream.NewBasicRTMPVideoStream(appData)
+	// Set output formats if not explicitly specified
+	for i, v := range params.Profiles {
+		if ffmpeg.FormatNone == v.Format {
+			params.Profiles[i].Format = format
+		}
+	}
+
+	cxn, err := s.registerConnection(ctx, st, vcodec, mediaFormat.PixFormat, segPar)
+	if err != nil {
+		st.Close()
+		if err != errAlreadyExists {
+			return nil, mid, http.StatusInternalServerError, fmt.Errorf("http push error url=%s err=%q", reqURL, err)
+		}
+		// A concurrent first request may have created this connection after
+		// our initial lookup. Never attach a differently authorized request.
+		if !ingestAuthorizationMatches(cxn, ingestConfig, remoteAddr) {
+			return nil, mid, http.StatusForbidden, errors.New("Ingest authorization changed for active stream")
+		}
+	} else {
+		// Start a watchdog to remove session after a period of inactivity
+		ticker := time.NewTicker(httpPushTimeout)
+		go func(s *LivepeerServer, intmid, extmid core.ManifestID) {
+			runCheck := func() BreakOperation {
+				var lastUsed time.Time
+				s.connectionLock.RLock()
+				if cxn, exists := s.getActiveRtmpConnectionUnsafe(intmid); exists {
+					lastUsed = cxn.lastUsed
+				}
+				if _, exists := s.internalManifests[extmid]; !exists && intmid != extmid {
+					s.connectionLock.RUnlock()
+					clog.Warningf(ctx, "Watchdog tried closing session for streamID=%s, which was already closed", extmid)
+					return true
+				}
+				s.connectionLock.RUnlock()
+				if time.Since(lastUsed) > httpPushTimeout {
+					_ = removeRTMPStream(context.TODO(), s, extmid)
+					return true
+				}
+				return false
+			}
+			defer ticker.Stop()
+			if s.context == nil {
+				for range ticker.C {
+					if runCheck() {
+						return
+					}
+				}
+			}
+			for {
+				select {
+				case <-ticker.C:
+					if runCheck() {
+						return
+					}
+				case <-s.context.Done():
+					return
+				}
+			}
+		}(s, cxn.mid, mid)
+	}
+	// Regardless of old/new cxn returned by registerConnection, we make sure
+	// our internalManifests mapping is OK before moving on
+	if cxn.mid != mid {
+		// AuthWebhook provided different ManifestID
+		s.connectionLock.Lock()
+		s.internalManifests[mid] = cxn.mid
+		s.connectionLock.Unlock()
+		mid = cxn.mid
+	}
+	return cxn, mid, 0, nil
+}
+
 // HandlePush processes request for HTTP ingest
 func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	errorOut := func(status int, s string, params ...interface{}) {
@@ -799,6 +958,10 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
+	if isSessionWarmupPath(r.URL.Path) {
+		s.HandleSessionWarmup(w, r)
+		return
+	}
 	if r.Method != "POST" && r.Method != "PUT" {
 		errorOut(http.StatusMethodNotAllowed, `http push request wrong method=%s url=%s host=%s`, r.Method, r.URL, r.Host)
 		return
@@ -874,20 +1037,12 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 		errorOut(http.StatusBadRequest, "Bad URL url=%s", r.URL)
 		return
 	}
-	s.connectionLock.RLock()
-	if intmid, exists := s.internalManifests[mid]; exists {
-		mid = intmid
-	}
-	cxn, exists := s.getActiveRtmpConnectionUnsafe(mid)
-	s.connectionLock.RUnlock()
+	cxn, mid, exists := s.lookupHTTPIngest(mid)
 	ctx = clog.AddManifestID(ctx, string(mid))
 	if exists && cxn != nil {
-		if AuthWebhookURL != nil {
-			tokenHash := sha256.Sum256([]byte(ingestConfig.JobToken))
-			if tokenHash != cxn.params.IngestJobTokenHash || remoteAddr != cxn.params.AuthorizedSourceIP {
-				errorOut(http.StatusForbidden, "Ingest authorization changed for active stream")
-				return
-			}
+		if !ingestAuthorizationMatches(cxn, ingestConfig, remoteAddr) {
+			errorOut(http.StatusForbidden, "Ingest authorization changed for active stream")
+			return
 		}
 		s.connectionLock.Lock()
 		cxn.lastUsed = now
@@ -922,128 +1077,16 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 
 	// Check for presence and register if a fresh cxn
 	if !exists {
-		source := ingestSource{
-			Width:       mediaFormat.Width,
-			Height:      mediaFormat.Height,
-			FPS:         float64(mediaFormat.FPS),
-			Codec:       mediaFormat.Vcodec,
-			PixelFormat: pixelFormatName(mediaFormat.PixFormat),
-		}
-		appData, err := (createHTTPPushStreamIDHandler(ctx, s, &httpPushAuthContext{
-			config: ingestConfig, remoteIP: remoteAddr, source: source,
-		}))(r.URL)
+		var status int
+		cxn, mid, status, err = s.registerHTTPIngest(ctx, r.URL, mid, ingestConfig, remoteAddr, mediaFormat, vcodec, format, &segPar)
 		if err != nil {
-			if errors.Is(err, errForbidden) {
-				errorOut(http.StatusForbidden, "Could not create stream ID: url=%s", r.URL)
-				return
-			} else {
-				errorOut(http.StatusInternalServerError, "Could not create stream ID: url=%s", r.URL)
-				return
-			}
-		}
-		params := streamParams(appData)
-		params.Resolution = fmt.Sprintf("%dx%d", mediaFormat.Width, mediaFormat.Height)
-		params.Format = format
-		s.connectionLock.RLock()
-		_, cxnExists := s.getActiveRtmpConnectionUnsafe(params.ManifestID)
-		if mid != params.ManifestID && cxnExists && s.internalManifests[mid] == "" {
-			// Pre-existing connection found for this new stream with the same underlying manifestID
-			var oldStreamID core.ManifestID
-			for k, v := range s.internalManifests {
-				if v == params.ManifestID {
-					oldStreamID = k
-					break
-				}
-			}
-			s.connectionLock.RUnlock()
-			if oldStreamID != "" && mid != oldStreamID {
-				// Close the old connection, and open a new one
-				// TODO try to re-use old HLS playlist?
-				clog.Warningf(ctx, "Ending streamID=%v as new streamID=%s with same manifestID=%s has arrived",
-					oldStreamID, mid, params.ManifestID)
-				removeRTMPStream(context.TODO(), s, oldStreamID)
-			}
-		} else {
-			s.connectionLock.RUnlock()
-		}
-		st := stream.NewBasicRTMPVideoStream(appData)
-		// Set output formats if not explicitly specified
-		for i, v := range params.Profiles {
-			if ffmpeg.FormatNone == v.Format {
-				params.Profiles[i].Format = format
-			}
-		}
-
-		cxn, err = s.registerConnection(ctx, st, vcodec, mediaFormat.PixFormat, &segPar)
-		if err != nil {
-			st.Close()
-			if err != errAlreadyExists {
-				errorOut(http.StatusInternalServerError, "http push error url=%s err=%q", r.URL, err)
-				return
-			}
-			// A concurrent first segment may have created this connection after
-			// our initial lookup. Never attach a differently authorized request.
-			if AuthWebhookURL != nil {
-				tokenHash := sha256.Sum256([]byte(ingestConfig.JobToken))
-				if tokenHash != cxn.params.IngestJobTokenHash || remoteAddr != cxn.params.AuthorizedSourceIP {
-					errorOut(http.StatusForbidden, "Ingest authorization changed for active stream")
-					return
-				}
-			}
-		} else {
-			// Start a watchdog to remove session after a period of inactivity
-			ticker := time.NewTicker(httpPushTimeout)
-			// print stack trace here:
-			go func(s *LivepeerServer, intmid, extmid core.ManifestID) {
-				runCheck := func() BreakOperation {
-					var lastUsed time.Time
-					s.connectionLock.RLock()
-					if cxn, exists := s.getActiveRtmpConnectionUnsafe(intmid); exists {
-						lastUsed = cxn.lastUsed
-					}
-					if _, exists := s.internalManifests[extmid]; !exists && intmid != extmid {
-						s.connectionLock.RUnlock()
-						clog.Warningf(ctx, "Watchdog tried closing session for streamID=%s, which was already closed", extmid)
-						return true
-					}
-					s.connectionLock.RUnlock()
-					if time.Since(lastUsed) > httpPushTimeout {
-						_ = removeRTMPStream(context.TODO(), s, extmid)
-						return true
-					}
-					return false
-				}
-				defer ticker.Stop()
-				if s.context == nil {
-					for range ticker.C {
-						if runCheck() {
-							return
-						}
-					}
-				}
-				for {
-					select {
-					case <-ticker.C:
-						if runCheck() {
-							return
-						}
-					case <-s.context.Done():
-						return
-					}
-				}
-			}(s, cxn.mid, mid)
-		}
-		// Regardless of old/new cxn returned by registerConnection, we make sure
-		// our internalManifests mapping is OK before moving on
-		if cxn.mid != mid {
-			// AuthWebhook provided different ManifestID
-			s.connectionLock.Lock()
-			s.internalManifests[mid] = cxn.mid
-			s.connectionLock.Unlock()
-			mid = cxn.mid
+			errorOut(status, "%s", err.Error())
+			return
 		}
 	}
 	ctx = clog.AddManifestID(ctx, string(mid))
+	// A session warm-up arriving after this segment has nothing left to warm.
+	cxn.claimSessionUse()
 	defer func(now time.Time) {
 		clog.Infof(ctx, "Finished push request at url=%s ua=%s addr=%s bytes=%d dur=%s resolution=%s took=%s", r.URL.String(), r.UserAgent(), r.RemoteAddr, len(body),
 			r.Header.Get("Content-Duration"), r.Header.Get("Content-Resolution"), time.Since(now))

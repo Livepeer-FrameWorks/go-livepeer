@@ -1056,7 +1056,9 @@ func emitFrameworksTranscodeOutcome(ctx context.Context, sess *BroadcastSession,
 		payload.ErrorKind = classifyTranscodeError(err)
 	}
 	payload.Disposition = "workload"
-	if errors.Is(context.Cause(ctx), errHedgeLost) {
+	if isSessionWarmup(ctx) {
+		payload.Disposition = sessionWarmupDisposition
+	} else if errors.Is(context.Cause(ctx), errHedgeLost) {
 		payload.Disposition = "hedge_loser"
 	} else if err != nil && isNonRetryableError(err) {
 		payload.Disposition = "input_fault"

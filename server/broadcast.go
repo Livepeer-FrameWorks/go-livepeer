@@ -933,11 +933,17 @@ func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *
 }
 
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
+	bs.pushInFlight(time.Duration(seg.Duration * float64(time.Second)))
+}
+
+// pushInFlight records a submission that selectSessions keeps reusing the
+// session for while it has been in flight for less than segDur.
+func (bs *BroadcastSession) pushInFlight(segDur time.Duration) {
 	bs.lock.Lock()
 	bs.SegsInFlight = append(bs.SegsInFlight,
 		SegFlightMetadata{
 			startTime: time.Now(),
-			segDur:    time.Duration(seg.Duration * float64(time.Second)),
+			segDur:    segDur,
 		})
 	bs.lock.Unlock()
 }
