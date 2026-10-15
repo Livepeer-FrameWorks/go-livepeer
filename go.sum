@@ -76,8 +76,8 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapp
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0/go.mod h1:cSgYe11MCNYunTnRXrKiR/tHc0eoKjICUuWpNZoVCOo=
 github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661 h1:JdEH8Cr+eGcqW9t2ckGWvlw924dPJqguj8Uio36beTc=
 github.com/Livepeer-FrameWorks/lpms v0.0.0-20260901160736-966922d9d661/go.mod h1:z5ROP1l5OzAKSoqVRLc34MjUdueil6wHSecQYV7llIw=
-github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261011054507-0540e67c18f5 h1:XLXNZs2xVAWrGvxilVmnVld5q3mSnybGkhlA9j1KK5M=
-github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261011054507-0540e67c18f5/go.mod h1:Dy83AneQzM5ijdYoby9EPfuJ9PKEwLiHbjfxIxrvD8g=
+github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261014145331-2f2d2971c642 h1:7JGJmQtS6mcGXNNAyIUXIZQf36doJTVf/mGF7S3I5WE=
+github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261014145331-2f2d2971c642/go.mod h1:t9jFCZoQ53hl0zLqSgpzb0BgWFWq4tfWHJV7yP9zY8g=
 github.com/Masterminds/semver/v3 v3.2.1 h1:RN9w6+7QoMeJVGyfmbcgs28Br8cvmnucEXnY0rYXWg0=
 github.com/Masterminds/semver/v3 v3.2.1/go.mod h1:qvl/7zhW3nngYb5+80sSMF+FG2BjYrf8m9wsX0PNOMQ=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
