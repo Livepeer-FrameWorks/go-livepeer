@@ -1620,7 +1620,22 @@ func TestProcessSegment_HedgesSlowOrchestrator(t *testing.T) {
 	assert.Empty(slow.SegsInFlight)
 }
 
-func TestProcessSegment_BudgetCapsSingleOrchestrator(t *testing.T) {
+// processBudgeted processes seg under a steady budget starting now, as one
+// push does.
+func processBudgeted(ctx context.Context, cxn *rtmpConnection, seg *stream.HLSSegment) ([]string, time.Duration, segmentBudget, error) {
+	start := time.Now()
+	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, start)
+	pctx, pcancel := context.WithDeadline(ctx, budget.processingDeadline())
+	defer pcancel()
+	urls, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
+	return urls, time.Since(start), budget, err
+}
+
+// An orchestrator that has not answered when the segment budget ends is not
+// at fault for that alone: the segment answers 503 within its budget and the
+// orchestrator stays. Its first submission paid for the session setup and
+// is no slow strike either.
+func TestProcessSegment_BudgetCutIsNotAnOrchestratorFault(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1631,18 +1646,67 @@ func TestProcessSegment_BudgetCapsSingleOrchestrator(t *testing.T) {
 	bsm := bsmWithSessListExt([]*BroadcastSession{stalled}, nil, true)
 	cxn := budgetTestConnection(bsm)
 
-	seg := &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0}
-	start := time.Now()
-	budget := resolveSegmentBudget(cxn.params, 0, seg.Duration, start)
-	pctx, pcancel := context.WithDeadline(ctx, budget.deadline())
-	defer pcancel()
-	_, err := processSegment(withSegmentBudget(pctx, budget), cxn, seg, nil)
-	took := time.Since(start)
-
-	assert.Error(err)
+	_, took, budget, err := processBudgeted(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0})
+	assert.ErrorIs(err, errSegmentBudgetExhausted)
 	assert.Equal(http.StatusServiceUnavailable, pushErrorStatus(err))
+	assert.GreaterOrEqual(took, budget.total-50*time.Millisecond, "the submission ran until the budget ended")
 	assert.Less(took, budget.total+200*time.Millisecond)
-	assert.NotContains(bsm.trustedPool.sessMap, stalled.Transcoder(), "an orchestrator that hits its cap is suspended")
+	assert.Contains(bsm.trustedPool.sessMap, stalled.Transcoder(), "a budget cut is not an orchestrator fault")
+	assert.Zero(bsm.trustedPool.sus.Suspended(stalled.Transcoder()))
+	assert.Zero(stalled.slowStrikes, "a session setup submission is not a slow strike")
+}
+
+// An orchestrator that never answers loses the segment to the hedge, and the
+// stream moves to the orchestrator that answered.
+func TestProcessSegment_DeadOrchestratorIsReplacedByHedge(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var deadCalls, goodCalls atomic.Int32
+	dead := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, time.Minute, "", &deadCalls)))
+	good := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &goodCalls)))
+	dead.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	good.Params.Profiles = dead.Params.Profiles
+	// LIFOSelector pops the last added session first.
+	bsm := bsmWithSessListExt([]*BroadcastSession{good, dead}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	for seq := uint64(0); seq < 3; seq++ {
+		urls, took, _, err := processBudgeted(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), SeqNo: seq, Duration: 1.0})
+		require.NoError(t, err, "seq=%d", seq)
+		assert.Len(urls, 1)
+		assert.Less(took, time.Second, "seq=%d is answered by the hedge, not after the budget", seq)
+	}
+	assert.EqualValues(1, deadCalls.Load(), "only the first segment went to the dead orchestrator")
+	assert.EqualValues(3, goodCalls.Load())
+	assert.Equal([]*BroadcastSession{good}, bsm.trustedPool.lastSess)
+}
+
+// An orchestrator that never answers and has no alternative is cut by every
+// segment's budget. Its first submission paid for the session setup; each
+// later cut ran longer than the workload tolerates and is a slow strike, so
+// it is suspended after slowStrikeLimit of them.
+func TestProcessSegment_DeadOrchestratorIsSuspendedAfterSlowStrikes(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	dead := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, time.Minute, "", &calls)))
+	dead.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	bsm := bsmWithSessListExt([]*BroadcastSession{dead}, nil, true)
+	cxn := budgetTestConnection(bsm)
+	pool := bsm.trustedPool
+
+	for seq := uint64(0); seq <= slowStrikeLimit; seq++ {
+		assert.Zero(pool.sus.Suspended(dead.Transcoder()), "not suspended before seq=%d", seq)
+		_, _, _, err := processBudgeted(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), SeqNo: seq, Duration: 0.5})
+		assert.ErrorIs(err, errSegmentBudgetExhausted, "seq=%d", seq)
+	}
+	assert.EqualValues(slowStrikeLimit+1, calls.Load())
+	assert.NotContains(pool.sessMap, dead.Transcoder())
+	assert.Greater(pool.sus.Suspended(dead.Transcoder()), 0)
 }
 
 func TestRecordRoundTrip_SuspendsAfterTwoSlowSegments(t *testing.T) {

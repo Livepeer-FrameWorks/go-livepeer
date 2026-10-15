@@ -29,13 +29,25 @@ import (
 //     request's header when no webhook is configured);
 //   - otherwise segment duration + liveBudgetSlack for live, and
 //     vodDefaultBudget for vod.
+//
+// A segment that a session still has to be set up for (see
+// resolveSessionSetupBudget) gets sessionSetupAllowance on top. One
+// orchestrator submission runs until processing ends; hedging, not a
+// per-orchestrator cap, is how a second orchestrator gets the segment while
+// the first is slow.
 const (
 	liveBudgetSlack       = 1000 * time.Millisecond
 	vodDefaultBudget      = 30 * time.Second
 	segmentResponseMargin = 500 * time.Millisecond
-	// singleOrchBudgetShare caps one orchestrator's round trip so a stalled
-	// orchestrator always leaves room for another attempt within B.
-	singleOrchBudgetShare = 0.8
+	// sessionSetupAllowance is the extra time a segment gets when the stream
+	// first has to be registered and an orchestrator has to set its session
+	// up (transcoder assignment, decoder, encoders) before the segment's own
+	// transcode. It covers the slowest first segments observed on public
+	// orchestrators: from the gateway receiving segment 0 to its answer, a
+	// cold session took up to about 4.5 s where a 2 s segment's budget
+	// answers by 2.5 s. Edges add the same allowance to the deadlineMs of a
+	// session's first segment.
+	sessionSetupAllowance = 2000 * time.Millisecond
 	// hedgeSegDurShare is the latest point, as a share of segment duration,
 	// at which a second orchestrator is started when the first has not
 	// answered.
@@ -68,7 +80,12 @@ const maxHedgesPerSegment = 1
 
 type segmentBudget struct {
 	start time.Time
+	// total is B: how long the edge waits for this push.
 	total time.Duration
+	// processing, when longer than total, is how long the segment's
+	// processing keeps running for a re-POST to join after the push itself
+	// was answered (see resolveSessionSetupBudget).
+	processing time.Duration
 	// hedges counts hedge submissions; shared by every copy of the budget.
 	hedges *atomic.Int32
 	// fetching, when set, is told whether processing holds an orchestrator's
@@ -111,31 +128,71 @@ func segmentBudgetFromContext(ctx context.Context) (segmentBudget, bool) {
 // resolveSegmentBudget returns B for one segment. requestDeadlineMs is the
 // deadlineMs of the request carrying the segment (0 when absent).
 func resolveSegmentBudget(params *core.StreamParameters, requestDeadlineMs int, segDurSec float64, start time.Time) segmentBudget {
+	return resolveBudget(params, requestDeadlineMs, segDurSec, start, 0)
+}
+
+// resolveSessionSetupBudget returns the budget of a segment that pays for
+// setting up the orchestrator session it goes to: segment 0 of a stream, or a
+// segment arriving while the stream has no orchestrator session that has
+// returned a result (sessionSetupPending). Such a segment gets B +
+// sessionSetupAllowance:
+//   - without a request deadlineMs, B is the stream's (or default) budget plus
+//     the allowance;
+//   - a request deadlineMs is how long the edge waits, and an edge that knows
+//     the segment starts a session already includes the allowance in it, so
+//     the stream's deadlineMs caps it only after adding the allowance;
+//   - processing runs at least until the stream's budget plus the allowance
+//     even when the request's own deadline ends earlier, so the edge's
+//     re-POST of a segment it sent with its steady deadline joins the
+//     transcode instead of finding it cancelled.
+func resolveSessionSetupBudget(params *core.StreamParameters, requestDeadlineMs int, segDurSec float64, start time.Time) segmentBudget {
+	return resolveBudget(params, requestDeadlineMs, segDurSec, start, sessionSetupAllowance)
+}
+
+func resolveBudget(params *core.StreamParameters, requestDeadlineMs int, segDurSec float64, start time.Time, allowance time.Duration) segmentBudget {
 	var streamDeadlineMs int
 	var workload string
 	if params != nil {
 		streamDeadlineMs = params.DeadlineMs
 		workload = params.Workload
 	}
-	var total time.Duration
+	streamDeadline := time.Duration(streamDeadlineMs) * time.Millisecond
+	// own is the budget the gateway derives without a request deadline.
+	var own time.Duration
 	switch {
-	case requestDeadlineMs > 0:
-		total = time.Duration(requestDeadlineMs) * time.Millisecond
-		if streamDeadlineMs > 0 && requestDeadlineMs > streamDeadlineMs {
-			total = time.Duration(streamDeadlineMs) * time.Millisecond
-		}
 	case streamDeadlineMs > 0:
-		total = time.Duration(streamDeadlineMs) * time.Millisecond
+		own = streamDeadline
 	case workload == core.WorkloadVOD:
-		total = vodDefaultBudget
+		own = vodDefaultBudget
 	default:
-		total = time.Duration(math.Max(segDurSec, 0)*float64(time.Second)) + liveBudgetSlack
+		own = time.Duration(math.Max(segDurSec, 0)*float64(time.Second)) + liveBudgetSlack
 	}
-	return segmentBudget{start: start, total: total, hedges: new(atomic.Int32)}
+	own += allowance
+	total := own
+	if requestDeadlineMs > 0 {
+		total = time.Duration(requestDeadlineMs) * time.Millisecond
+		if streamDeadlineMs > 0 && total > streamDeadline+allowance {
+			total = streamDeadline + allowance
+		}
+	}
+	processing := total
+	if allowance > 0 && own > processing {
+		processing = own
+	}
+	return segmentBudget{start: start, total: total, processing: processing, hedges: new(atomic.Int32)}
 }
 
-// deadline is when processing stops.
+// deadline is when the edge's wait for this push ends.
 func (b segmentBudget) deadline() time.Time { return b.start.Add(b.total) }
+
+// processingDeadline is when processing stops: the deadline, or later for a
+// segment whose processing runs past the edge's wait.
+func (b segmentBudget) processingDeadline() time.Time {
+	if b.processing > b.total {
+		return b.start.Add(b.processing)
+	}
+	return b.deadline()
+}
 
 // respondBy is when HandlePush answers 503 if processing has no result yet.
 // segmentResponseMargin before the deadline leaves the edge room to re-POST
@@ -148,11 +205,6 @@ func (b segmentBudget) respondBy() time.Time {
 		margin = b.total / 2
 	}
 	return b.start.Add(b.total - margin)
-}
-
-// orchCap is the longest a single orchestrator round trip may take.
-func (b segmentBudget) orchCap() time.Duration {
-	return time.Duration(float64(b.total) * singleOrchBudgetShare)
 }
 
 // budgetedMaxAttempts is how many orchestrators a segment with budget b may

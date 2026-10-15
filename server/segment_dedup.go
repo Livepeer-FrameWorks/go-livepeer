@@ -205,7 +205,7 @@ func (cxn *rtmpConnection) processSegmentDeduped(ctx context.Context, seg *strea
 		if urls, ok := cxn.cachedSegURLs(seg.SeqNo, hash); ok {
 			return urls, nil
 		}
-		pctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), budget.deadline())
+		pctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), budget.processingDeadline())
 		defer cancel()
 		pbudget := budget
 		pbudget.fetching = func(inHand bool) { cxn.setSegFetching(key, inHand) }

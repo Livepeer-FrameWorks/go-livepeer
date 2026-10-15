@@ -1177,6 +1177,11 @@ func (s *LivepeerServer) HandlePush(w http.ResponseWriter, r *http.Request) {
 		requestDeadlineMs = ingestConfig.DeadlineMs
 	}
 	budget := resolveSegmentBudget(cxn.params, requestDeadlineMs, seg.Duration, start)
+	if seg.SeqNo == 0 || cxn.sessManager.sessionSetupPending() {
+		budget = resolveSessionSetupBudget(cxn.params, requestDeadlineMs, seg.Duration, start)
+		clog.Infof(ctx, "Segment pays for an orchestrator session setup seqNo=%d budget=%s processing=%s",
+			seq, budget.total, budget.processingDeadline().Sub(start))
+	}
 	urls, err := cxn.processSegmentDeduped(ctx, seg, &segPar, budget)
 	if err != nil {
 		if errors.Is(err, errNoOrchs) || errors.Is(err, errDiscovery) {

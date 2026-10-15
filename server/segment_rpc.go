@@ -554,9 +554,12 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		httpTimeout = time.Duration(params.TimeoutMultiplier) * httpTimeout
 	}
 	// A segment budget (see segment_budget.go) arrives as the caller's context
-	// deadline and bounds the whole call, including the upload.
+	// deadline and bounds the whole call, including the upload. A budgeted
+	// submission runs until that deadline, so it is not cut short of it as
+	// an orchestrator error.
 	if dl, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(dl); remaining < httpTimeout {
+		_, budgeted := segmentBudgetFromContext(ctx)
+		if remaining := time.Until(dl); remaining < httpTimeout || budgeted {
 			httpTimeout = remaining
 		}
 		if uploadTimeout > httpTimeout {

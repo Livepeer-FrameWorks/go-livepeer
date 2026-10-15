@@ -36,7 +36,57 @@ func TestResolveSegmentBudget(t *testing.T) {
 	b := resolveSegmentBudget(live, 0, 2.0, now)
 	assert.Equal(now.Add(3*time.Second), b.deadline())
 	assert.Equal(now.Add(2500*time.Millisecond), b.respondBy())
-	assert.Equal(2400*time.Millisecond, b.orchCap())
+	assert.Equal(b.deadline(), b.processingDeadline(), "a steady segment's processing ends with its budget")
+}
+
+func TestResolveSessionSetupBudget(t *testing.T) {
+	now := time.Now()
+	live := &core.StreamParameters{Workload: core.WorkloadLive}
+	cases := []struct {
+		name              string
+		params            *core.StreamParameters
+		requestDeadlineMs int
+		total, processing time.Duration
+	}{
+		{"live without a request deadline", live, 0, 5 * time.Second, 5 * time.Second},
+		{"edge sends the allowance", live, 5000, 5 * time.Second, 5 * time.Second},
+		{"edge sends its steady deadline", live, 3000, 3 * time.Second, 5 * time.Second},
+		{"edge asks for more than the allowance", live, 8000, 8 * time.Second, 8 * time.Second},
+		{"stream deadline plus the allowance caps the request", &core.StreamParameters{Workload: core.WorkloadLive, DeadlineMs: 3000}, 8000, 5 * time.Second, 5 * time.Second},
+		{"vod stream deadline", &core.StreamParameters{Workload: core.WorkloadVOD, DeadlineMs: 30000}, 32000, 32 * time.Second, 32 * time.Second},
+		{"vod default", &core.StreamParameters{Workload: core.WorkloadVOD}, 0, 32 * time.Second, 32 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := resolveSessionSetupBudget(c.params, c.requestDeadlineMs, 2.0, now)
+			assert.Equal(t, c.total, b.total)
+			assert.Equal(t, now.Add(c.total), b.deadline())
+			assert.Equal(t, now.Add(c.total-segmentResponseMargin), b.respondBy())
+			assert.Equal(t, now.Add(c.processing), b.processingDeadline())
+		})
+	}
+}
+
+// The stream's next segment pays for a session setup until a session on the
+// stream's reuse list has returned a result, and again once that session is
+// gone.
+func TestSessionSetupPending(t *testing.T) {
+	sess := StubBroadcastSession("https://orch")
+	bsm := bsmWithSessListExt([]*BroadcastSession{sess}, nil, true)
+	assert.True(t, bsm.sessionSetupPending(), "a new stream")
+
+	pool := bsm.trustedPool
+	pool.lastSess = []*BroadcastSession{sess}
+	assert.True(t, bsm.sessionSetupPending(), "its session has not answered yet")
+
+	sess.markAnswered()
+	assert.False(t, bsm.sessionSetupPending(), "its session answered")
+
+	bsm.suspendAndRemoveOrch(context.Background(), sess, errors.New("test"))
+	assert.True(t, bsm.sessionSetupPending(), "the session that answered left the pool")
+
+	var nilBSM *BroadcastSessionsManager
+	assert.True(t, nilBSM.sessionSetupPending())
 }
 
 func TestSegmentBudget_OneHedgePerSegment(t *testing.T) {

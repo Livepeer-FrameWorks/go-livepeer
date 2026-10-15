@@ -932,6 +932,51 @@ func (bsm *BroadcastSessionsManager) recordRoundTrip(ctx context.Context, sess *
 		strikes, roundTrip, slowest, segDur))
 }
 
+// recordCutSubmission accounts for a submission that was cancelled after
+// running for elapsed without a result, because the segment budget ended or
+// another orchestrator answered first. Its round trip is at least elapsed: one
+// that already exceeded what the workload tolerates is a slow strike, as in
+// recordRoundTrip; a shorter one says nothing about the orchestrator.
+func (bsm *BroadcastSessionsManager) recordCutSubmission(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, elapsed time.Duration) {
+	segDur := time.Duration(seg.Duration * float64(time.Second))
+	if segDur <= 0 {
+		return
+	}
+	if elapsed > time.Duration(float64(segDur)*bsm.poolFor(sess).latencyScoreThreshold()) {
+		bsm.recordRoundTrip(ctx, sess, seg, elapsed)
+	}
+}
+
+// sessionSetupPending reports whether the stream's next segment goes to an
+// orchestrator session that has not returned a result yet: no session on the
+// stream's reuse lists has answered. That holds at stream start, after a
+// failed warm-up, and after the session the stream used was suspended or
+// swapped for one that is still setting up.
+func (bsm *BroadcastSessionsManager) sessionSetupPending() bool {
+	if bsm == nil {
+		return true
+	}
+	for _, pool := range []*SessionPool{bsm.untrustedPool, bsm.trustedPool} {
+		if pool != nil && pool.hasAnsweredReuseSession() {
+			return false
+		}
+	}
+	return true
+}
+
+// hasAnsweredReuseSession reports whether the reuse list holds a session of
+// this pool that has returned a result.
+func (sp *SessionPool) hasAnsweredReuseSession() bool {
+	sp.lock.Lock()
+	defer sp.lock.Unlock()
+	for _, sess := range sp.lastSess {
+		if existing, ok := sp.sessMap[sess.Transcoder()]; ok && existing == sess && !sess.awaitingFirstResult() {
+			return true
+		}
+	}
+	return false
+}
+
 func (bs *BroadcastSession) pushSegInFlight(seg *stream.HLSSegment) {
 	bs.pushInFlight(time.Duration(seg.Duration * float64(time.Second)))
 }
@@ -1445,9 +1490,9 @@ type submission struct {
 	start   time.Time
 	cancel  context.CancelCauseFunc
 	settled bool // its result has been handled
-	// warmup is set when sess had not returned a result when this
-	// submission started.
-	warmup bool
+	// setup is set when this submission pays for the orchestrator setting
+	// the session up (BroadcastSession.inSessionSetup when it started).
+	setup bool
 }
 
 // submitHedged submits seg to primary and, when the segment has a budget and
@@ -1455,6 +1500,10 @@ type submission struct {
 // The first successful result wins and the other submission is cancelled.
 // Every orchestrator that returns an error is suspended and removed, and its
 // error is returned as an *orchError unless another submission succeeds.
+// A submission runs until the segment's processing ends; one cancelled by
+// the budget or by the other orchestrator's answer is not an error of its
+// orchestrator. It counts as a slow strike only when it already ran longer
+// than the workload tolerates and did not pay for a session setup.
 // At most one hedge is started per attempt, so a hedged segment costs one
 // extra payment.
 func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSession, seg *stream.HLSSegment, name string,
@@ -1472,13 +1521,7 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 		}
 		sess.pushSegInFlight(segOut)
 		sctx, cancel := context.WithCancelCause(ctx)
-		if budgeted {
-			var cancelTimeout context.CancelFunc
-			sctx, cancelTimeout = context.WithTimeout(sctx, budget.orchCap())
-			parentCancel := cancel
-			cancel = func(cause error) { parentCancel(cause); cancelTimeout() }
-		}
-		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel, warmup: sess.awaitingFirstResult()})
+		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel, setup: sess.inSessionSetup()})
 		frameworks.SegmentSubmitted(ctx, sess.Transcoder())
 		submitMultiSession(sctx, sess, segOut, segPar, cxn.nonce, resc)
 		return nil
@@ -1518,11 +1561,14 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 						other.settled = true
 						other.cancel(errHedgeLost)
 						bsm.releaseSession(other.sess)
+						if !other.setup {
+							bsm.recordCutSubmission(ctx, other.sess, seg, time.Since(other.start))
+						}
 					}
 				}
 				sub.cancel(nil)
 				sub.sess.markAnswered()
-				if sub.warmup {
+				if sub.setup {
 					// The round trip includes session setup on the
 					// orchestrator; it must not make the session look
 					// too slow to reuse for the stream's next segment.
@@ -1549,9 +1595,16 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 				err = errors.New("empty response")
 			}
 			if ctx.Err() != nil {
-				// The segment's own context ended (budget spent or caller
-				// gone); that says nothing about this orchestrator.
+				// The segment's processing ended before this orchestrator
+				// answered, which is not an error of the orchestrator. A
+				// session setup had its allowance and is over; any other
+				// submission that ran too long is a slow strike.
 				bsm.releaseSession(r.Session)
+				if sub.setup {
+					r.Session.markSetupCut()
+				} else {
+					bsm.recordCutSubmission(ctx, r.Session, seg, time.Since(sub.start))
+				}
 				lastErr = err
 				continue
 			}

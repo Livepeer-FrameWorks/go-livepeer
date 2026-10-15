@@ -172,6 +172,11 @@ type BroadcastSession struct {
 	// result for this session; access under the lock. Segments submitted
 	// before then also paid for the orchestrator setting the session up.
 	answered bool
+	// setupCut is set when the segment budget ended a submission made while
+	// the orchestrator set the session up; access under the lock. The setup
+	// had its allowance, so later submissions before a first result no longer
+	// count as session setup.
+	setupCut bool
 }
 
 type GetOrchestratorInfoParams struct {
@@ -230,6 +235,22 @@ func (bs *BroadcastSession) awaitingFirstResult() bool {
 func (bs *BroadcastSession) markAnswered() {
 	bs.lock.Lock()
 	bs.answered = true
+	bs.lock.Unlock()
+}
+
+// inSessionSetup reports whether a submission starting now pays for the
+// orchestrator setting the session up: the session has not returned a result
+// and no earlier setup submission was cut by its segment budget. Such a
+// submission is neither slow nor at fault for running long or being cut.
+func (bs *BroadcastSession) inSessionSetup() bool {
+	bs.lock.RLock()
+	defer bs.lock.RUnlock()
+	return !bs.answered && !bs.setupCut
+}
+
+func (bs *BroadcastSession) markSetupCut() {
+	bs.lock.Lock()
+	bs.setupCut = true
 	bs.lock.Unlock()
 }
 

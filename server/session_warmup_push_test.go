@@ -120,7 +120,8 @@ func postSessionWarmup(t *testing.T, s *LivepeerServer, mid string) int {
 }
 
 // Without a warm-up, a cold orchestrator's session setup lands in the first
-// segment's budget and the segment misses it.
+// segment's budget: a push that waits only its steady deadline is answered
+// 503 before the setup is done.
 func TestPush_ColdSessionFirstSegmentMissesItsBudget(t *testing.T) {
 	s, calls := coldSessionStream(t, 2500*time.Millisecond, 200*time.Millisecond)
 	require.Equal(t, http.StatusServiceUnavailable, pushLiveSegment(t, s, "/live/mani/0.ts"))
