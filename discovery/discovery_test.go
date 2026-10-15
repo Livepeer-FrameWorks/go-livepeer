@@ -400,6 +400,8 @@ func sync_TestNewDBOrchestratorPoolCache_GivenListOfOrchs_CreatesPoolCacheCorrec
 	}
 	expTranscoder := "transcoderFromTest"
 	expPricePerPixel, _ := common.PriceToFixed(big.NewRat(999, 1))
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		return &net.OrchestratorInfo{
 			Address:      pm.RandBytes(20),
@@ -493,6 +495,8 @@ func TestNewDBOrchestratorPoolCache_TestURLs(t *testing.T) {
 
 	var mu sync.Mutex
 	first := true
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		mu.Lock()
 		if first {
@@ -738,6 +742,8 @@ func sync_TestCachedPool_AllOrchestratorsTooExpensive_ReturnsAllOrchestrators(t 
 	server.BroadcastCfg.SetMaxPrice(core.NewFixedPrice(big.NewRat(1, 1)))
 	gmp := runtime.GOMAXPROCS(50)
 	defer runtime.GOMAXPROCS(gmp)
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		return &net.OrchestratorInfo{
 			Address:      pm.RandBytes(20),
@@ -824,6 +830,8 @@ func sync_TestCachedPool_GetOrchestrators_MaxBroadcastPriceNotSet(t *testing.T) 
 	server.BroadcastCfg.SetMaxPrice(nil)
 	gmp := runtime.GOMAXPROCS(50)
 	defer runtime.GOMAXPROCS(gmp)
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		return &net.OrchestratorInfo{
 			Address:    pm.RandBytes(20),
@@ -915,6 +923,8 @@ func sync_TestCachedPool_N_OrchestratorsGoodPricing_ReturnsNOrchestrators(t *tes
 	server.BroadcastCfg.SetMaxPrice(core.NewFixedPrice(big.NewRat(10, 1)))
 	gmp := runtime.GOMAXPROCS(50)
 	defer runtime.GOMAXPROCS(gmp)
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		if i, _ := strconv.Atoi(orchestratorServer.Port()); i > 8960 {
 			// Return valid pricing
@@ -1035,6 +1045,8 @@ func TestCachedPool_GetOrchestrators_TicketParamsValidation(t *testing.T) {
 
 	server.BroadcastCfg.SetMaxPrice(nil)
 
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		return &net.OrchestratorInfo{
 			Address:      pm.RandBytes(20),
@@ -1107,6 +1119,8 @@ func sync_TestCachedPool_GetOrchestrators_OnlyActiveOrchestrators(t *testing.T) 
 	server.BroadcastCfg.SetMaxPrice(nil)
 	gmp := runtime.GOMAXPROCS(50)
 	defer runtime.GOMAXPROCS(gmp)
+	oldServerGetOrchInfo := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldServerGetOrchInfo }()
 	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
 		return &net.OrchestratorInfo{
 			Address:    pm.RandBytes(20),
