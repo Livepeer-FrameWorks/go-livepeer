@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1519,6 +1520,75 @@ func TestWebhookPool_SuccessfulEmptyRefreshClearsCache(t *testing.T) {
 	require.NotNil(t, pool.pool)
 	require.Zero(t, pool.Size())
 	require.True(t, pool.lastRequest.After(staleRequest))
+}
+
+// A caller that finds the cache stale while a webhook request is in flight
+// shares that request instead of starting its own, so an older response can
+// never replace the pool after a newer one.
+func TestWebhookPool_ConcurrentStaleCallersShareOneRefresh(t *testing.T) {
+	var requests atomic.Int32
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondRequest := make(chan struct{}, 1)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		addr := "https://127.0.0.1:8936"
+		if requests.Add(1) == 1 {
+			close(firstEntered)
+			<-releaseFirst
+		} else {
+			addr = "https://127.0.0.1:8937"
+			select {
+			case secondRequest <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"address":"` + addr + `"}]`))
+	}))
+	defer webhook.Close()
+
+	whURL, err := url.ParseRequestURI(webhook.URL)
+	require.NoError(t, err)
+	pool := &webhookPool{
+		callback: whURL,
+		mu:       &sync.RWMutex{},
+		bcast:    &stubBroadcaster{},
+	}
+
+	type result struct {
+		infos []common.OrchestratorLocalInfo
+		err   error
+	}
+	first := make(chan result, 1)
+	go func() {
+		infos, err := pool.getInfos()
+		first <- result{infos, err}
+	}()
+	<-firstEntered
+
+	second := make(chan result, 1)
+	go func() {
+		infos, err := pool.getInfos()
+		second <- result{infos, err}
+	}()
+	select {
+	case <-secondRequest:
+		close(releaseFirst)
+		<-first
+		<-second
+		require.Fail(t, "a stale caller started a second webhook request while one was in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releaseFirst)
+
+	r1, r2 := <-first, <-second
+	require.NoError(t, r1.err)
+	require.NoError(t, r2.err)
+	require.Len(t, r1.infos, 1)
+	require.Equal(t, "https://127.0.0.1:8936", r1.infos[0].URL.String())
+	require.Equal(t, r1.infos, r2.infos)
+	require.Equal(t, int32(1), requests.Load())
+	require.Equal(t, r1.infos, pool.GetInfos())
 }
 
 func TestDeserializeWebhookJSON(t *testing.T) {

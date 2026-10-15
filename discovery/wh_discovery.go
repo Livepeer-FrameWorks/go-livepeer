@@ -16,6 +16,7 @@ import (
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/server"
+	"golang.org/x/sync/singleflight"
 )
 
 type webhookResponse struct {
@@ -34,6 +35,11 @@ type webhookPool struct {
 	discoveryTimeout    time.Duration
 	ignoreCapacityCheck bool
 	getOrchInfo         func(context.Context, common.Broadcaster, *url.URL, server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error)
+	// refresh runs at most one webhook request at a time. Callers that find
+	// the cache stale while a request is in flight share its result, so a
+	// request that started earlier can never replace the pool or lastRequest
+	// after a later one has.
+	refresh singleflight.Group
 }
 
 func NewWebhookPool(bcast common.Broadcaster, callback *url.URL, discoveryTimeout time.Duration) *webhookPool {
@@ -73,6 +79,24 @@ func (w *webhookPool) getInfos() ([]common.OrchestratorLocalInfo, error) {
 	w.mu.RUnlock()
 
 	// retrieve addrs from cache if time since lastRequest is less than the refresh interval
+	if time.Since(lastReq) < common.WebhookDiscoveryRefreshInterval {
+		return pool.GetInfos(), nil
+	}
+
+	v, err, _ := w.refresh.Do("refresh", func() (any, error) {
+		return w.refreshInfos()
+	})
+	infos, _ := v.([]common.OrchestratorLocalInfo)
+	return infos, err
+}
+
+func (w *webhookPool) refreshInfos() ([]common.OrchestratorLocalInfo, error) {
+	// A refresh that completed between the caller's staleness check and this
+	// one already renewed the cache.
+	w.mu.RLock()
+	lastReq := w.lastRequest
+	pool := w.pool
+	w.mu.RUnlock()
 	if time.Since(lastReq) < common.WebhookDiscoveryRefreshInterval {
 		return pool.GetInfos(), nil
 	}
