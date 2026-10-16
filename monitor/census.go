@@ -122,6 +122,7 @@ type (
 		kEventType                    tag.Key
 		kPipeline                     tag.Key
 		kModelName                    tag.Key
+		kCutReason                    tag.Key
 		mSegmentSourceAppeared        *stats.Int64Measure
 		mSegmentEmerged               *stats.Int64Measure
 		mSegmentEmergedUnprocessed    *stats.Int64Measure
@@ -166,6 +167,7 @@ type (
 		mOrchestratorSwaps            *stats.Int64Measure
 		mSegmentHedges                *stats.Int64Measure
 		mSegmentHedgeWins             *stats.Int64Measure
+		mSegmentSubmissionCut         *stats.Int64Measure
 
 		// Metrics for sending payments
 		mTicketValueSent    *stats.Float64Measure
@@ -304,6 +306,7 @@ func InitCensus(nodeType NodeType, version string) {
 	census.kSegClassName = tag.MustNewKey("seg_class_name")
 	census.kModelName = tag.MustNewKey("model_name")
 	census.kPipeline = tag.MustNewKey("pipeline")
+	census.kCutReason = tag.MustNewKey("reason")
 	census.ctx, err = tag.New(ctx, tag.Insert(census.kNodeType, string(nodeType)), tag.Insert(census.kNodeID, NodeID))
 	if err != nil {
 		glog.Exit("Error creating context", err)
@@ -354,6 +357,7 @@ func InitCensus(nodeType NodeType, version string) {
 	census.mOrchestratorSwaps = stats.Int64("orchestrator_swaps", "Number of orchestrator swaps mid-stream", "tot")
 	census.mSegmentHedges = stats.Int64("segment_hedges", "Number of segments submitted to a second orchestrator because the first was slow", "tot")
 	census.mSegmentHedgeWins = stats.Int64("segment_hedge_wins", "Number of hedged segments whose result came from the hedge orchestrator", "tot")
+	census.mSegmentSubmissionCut = stats.Int64("segment_submission_cut_total", "Number of segment submissions ended by the gateway before their orchestrator answered", "tot")
 
 	// Metrics for sending payments
 	census.mTicketValueSent = stats.Float64("ticket_value_sent", "TicketValueSent", "gwei")
@@ -779,6 +783,13 @@ func InitCensus(nodeType NodeType, version string) {
 			Measure:     census.mSegmentHedgeWins,
 			Description: "Number of hedged segments whose result came from the hedge orchestrator",
 			TagKeys:     baseTags,
+			Aggregation: view.Count(),
+		},
+		{
+			Name:        "segment_submission_cut_total",
+			Measure:     census.mSegmentSubmissionCut,
+			Description: "Number of segment submissions ended by the gateway before their orchestrator answered, by reason",
+			TagKeys:     append([]tag.Key{census.kCutReason}, baseTags...),
 			Aggregation: view.Count(),
 		},
 
@@ -1467,6 +1478,16 @@ func SegmentHedged(won bool) {
 	stats.Record(census.ctx, census.mSegmentHedges.M(1))
 	if won {
 		stats.Record(census.ctx, census.mSegmentHedgeWins.M(1))
+	}
+}
+
+// SegmentSubmissionCut records a segment submission the gateway ended before
+// its orchestrator answered: reason is "hedge_lost" when another orchestrator
+// answered the segment first, "segment_ended" when the segment's processing
+// ended. Neither is a failure of the orchestrator.
+func SegmentSubmissionCut(ctx context.Context, reason string) {
+	if err := stats.RecordWithTags(census.ctx, []tag.Mutator{tag.Insert(census.kCutReason, reason)}, census.mSegmentSubmissionCut.M(1)); err != nil {
+		clog.Errorf(ctx, "Error recording metric err=%q", err)
 	}
 }
 

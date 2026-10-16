@@ -53,6 +53,53 @@ var errDuration = errors.New("invalid duration")
 var errCapCompat = errors.New("incompatible capabilities")
 
 var tlsConfig = &tls.Config{InsecureSkipVerify: true}
+
+// Counters for a submission that ended without a result. Package variables so
+// tests can observe which outcome SubmitSegment recorded without the
+// process-wide census.
+var (
+	countSegmentUploadFailed = func(ctx context.Context, nonce, seqNo uint64, err error, uri string) {
+		if monitor.Enabled {
+			monitor.SegmentUploadFailed(ctx, nonce, seqNo, monitor.SegmentUploadErrorUnknown, err, false, uri)
+		}
+	}
+	countSegmentReadBodyFailed = func(ctx context.Context, nonce, seqNo uint64, err error) {
+		if monitor.Enabled {
+			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorReadBody, nonce, seqNo, err, false)
+		}
+	}
+	countSubmissionCut = func(ctx context.Context, reason string) {
+		if monitor.Enabled {
+			monitor.SegmentSubmissionCut(ctx, reason)
+		}
+	}
+)
+
+const (
+	submissionCutHedgeLost    = "hedge_lost"
+	submissionCutSegmentEnded = "segment_ended"
+)
+
+// submissionCutReason reports why the caller of a submission ended it before
+// the orchestrator answered, or "" while the caller still wants the answer.
+// callerCtx is the context SubmitSegment was given: it ends with errHedgeLost
+// when another orchestrator answered the segment, and otherwise when the
+// segment's processing ended (its budget ran out or it was cancelled). Its
+// deadline having passed counts as ended, so the upload timer, which shares
+// that deadline under a budget, cannot win the race into a failure.
+func submissionCutReason(callerCtx context.Context) string {
+	if callerCtx.Err() == nil {
+		dl, ok := callerCtx.Deadline()
+		if !ok || time.Now().Before(dl) {
+			return ""
+		}
+	}
+	if errors.Is(context.Cause(callerCtx), errHedgeLost) {
+		return submissionCutHedgeLost
+	}
+	return submissionCutSegmentEnded
+}
+
 var httpClient = &http.Client{
 	Transport: &http.Transport{
 		TLSClientConfig: tlsConfig,
@@ -567,6 +614,7 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 		}
 	}
 
+	callerCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
@@ -599,10 +647,13 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	uploadDur := time.Since(start)
 	uploadDurFW = uploadDur
 	if err != nil {
-		clog.Errorf(ctx, "Unable to submit segment orch=%v orch=%s uploadDur=%s err=%q", ti.Transcoder, ti.Transcoder, uploadDur, err)
-		if monitor.Enabled {
-			monitor.SegmentUploadFailed(ctx, nonce, seg.SeqNo, monitor.SegmentUploadErrorUnknown, err, false, sess.OrchestratorInfo.Transcoder)
+		if reason := submissionCutReason(callerCtx); reason != "" {
+			clog.V(common.DEBUG).Infof(ctx, "Segment submission ended before response headers orch=%s reason=%s uploadDur=%s err=%q", ti.Transcoder, reason, uploadDur, err)
+			countSubmissionCut(ctx, reason)
+			return nil, fmt.Errorf("header timeout: %w", err)
 		}
+		clog.Errorf(ctx, "Unable to submit segment orch=%v orch=%s uploadDur=%s err=%q", ti.Transcoder, ti.Transcoder, uploadDur, err)
+		countSegmentUploadFailed(ctx, nonce, seg.SeqNo, err, sess.OrchestratorInfo.Transcoder)
 		return nil, fmt.Errorf("header timeout: %w", err)
 	}
 	defer resp.Body.Close()
@@ -641,10 +692,13 @@ func SubmitSegment(ctx context.Context, sess *BroadcastSession, seg *stream.HLSS
 	data, err = ioutil.ReadAll(resp.Body)
 	tookAllDur := time.Since(start)
 	if err != nil {
-		clog.Errorf(ctx, "Unable to read response body for segment orch=%s err=%q", ti.Transcoder, err)
-		if monitor.Enabled {
-			monitor.SegmentTranscodeFailed(ctx, monitor.SegmentTranscodeErrorReadBody, nonce, seg.SeqNo, err, false)
+		if reason := submissionCutReason(callerCtx); reason != "" {
+			clog.V(common.DEBUG).Infof(ctx, "Segment submission ended before its result orch=%s reason=%s err=%q", ti.Transcoder, reason, err)
+			countSubmissionCut(ctx, reason)
+			return nil, fmt.Errorf("body timeout: %w", err)
 		}
+		clog.Errorf(ctx, "Unable to read response body for segment orch=%s err=%q", ti.Transcoder, err)
+		countSegmentReadBodyFailed(ctx, nonce, seg.SeqNo, err)
 		return nil, fmt.Errorf("body timeout: %w", err)
 	}
 	transcodeDur := tookAllDur - uploadDur

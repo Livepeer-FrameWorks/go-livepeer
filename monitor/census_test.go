@@ -9,6 +9,7 @@ import (
 
 	lpnet "github.com/livepeer/go-livepeer/net"
 	"github.com/stretchr/testify/assert"
+	"go.opencensus.io/stats/view"
 )
 
 func TestAveragerCanBeRemoved(t *testing.T) {
@@ -174,4 +175,41 @@ func TestFracWei2Gwei(t *testing.T) {
 
 	wei = big.NewRat(gweiConversionFactor*2, 7)
 	assert.InDelta(.285714286, fracwei2gwei(wei), delta)
+}
+
+// A submission the gateway ended is counted by reason and never as an upload
+// failure.
+func TestSegmentSubmissionCutCountsByReason(t *testing.T) {
+	// Views register once per process; reuse the census another test set up.
+	if census.mSegmentSubmissionCut == nil {
+		unitTestMode = true
+		defer func() { unitTestMode = false }()
+		InitCensus("bctr", "testversion")
+	}
+	count := func(name string) map[string]int64 {
+		rows, err := view.RetrieveData(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]int64{}
+		for _, row := range rows {
+			reason := ""
+			for _, tg := range row.Tags {
+				if tg.Key == census.kCutReason {
+					reason = tg.Value
+				}
+			}
+			out[reason] += row.Data.(*view.CountData).Value
+		}
+		return out
+	}
+	before := count("segment_submission_cut_total")
+	failedBefore := count("segment_source_upload_failed_total")
+	SegmentSubmissionCut(context.Background(), "hedge_lost")
+	SegmentSubmissionCut(context.Background(), "hedge_lost")
+	SegmentSubmissionCut(context.Background(), "segment_ended")
+	after := count("segment_submission_cut_total")
+	assert.Equal(t, before["hedge_lost"]+2, after["hedge_lost"])
+	assert.Equal(t, before["segment_ended"]+1, after["segment_ended"])
+	assert.Equal(t, failedBefore, count("segment_source_upload_failed_total"))
 }

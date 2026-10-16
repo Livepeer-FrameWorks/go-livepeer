@@ -399,3 +399,104 @@ func TestSubmitSegment_SessionSetupRoundTripIsNotPerformance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Eventually(t, func() bool { return samples() == "1" }, 2*time.Second, 20*time.Millisecond)
 }
+
+// observeSubmissionFailures records the upload and response-body failures
+// and the cut reasons SubmitSegment counts for the rest of the test.
+func observeSubmissionFailures(t *testing.T) (uploads, bodies *atomic.Int32, cuts *atomic.Value) {
+	uploads, bodies, cuts = &atomic.Int32{}, &atomic.Int32{}, &atomic.Value{}
+	cuts.Store("")
+	oldUpload, oldBody, oldCut := countSegmentUploadFailed, countSegmentReadBodyFailed, countSubmissionCut
+	countSegmentUploadFailed = func(context.Context, uint64, uint64, error, string) { uploads.Add(1) }
+	countSegmentReadBodyFailed = func(context.Context, uint64, uint64, error) { bodies.Add(1) }
+	countSubmissionCut = func(_ context.Context, reason string) { cuts.Store(cuts.Load().(string) + reason) }
+	t.Cleanup(func() {
+		countSegmentUploadFailed, countSegmentReadBodyFailed, countSubmissionCut = oldUpload, oldBody, oldCut
+	})
+	return uploads, bodies, cuts
+}
+
+// stalledOrchHandler answers /segment with nothing until the gateway gives up
+// on the request: before the response headers, or after them when
+// headersFirst is set. arrived receives one value per request.
+func stalledOrchHandler(headersFirst bool, arrived chan<- struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if headersFirst {
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		arrived <- struct{}{}
+		<-r.Context().Done()
+	}
+}
+
+// A submission the gateway ends itself, because another orchestrator answered
+// the segment or the segment's processing ended, says nothing about its
+// orchestrator: it is counted as a cut with its reason, never as an upload or
+// response failure.
+func TestSubmitSegment_CutSubmissionIsNotAFailure(t *testing.T) {
+	cases := []struct {
+		name         string
+		headersFirst bool
+		end          func(cancel context.CancelCauseFunc)
+		deadline     time.Duration
+		reason       string
+	}{
+		{name: "hedge lost before response headers", end: func(cancel context.CancelCauseFunc) { cancel(errHedgeLost) }, reason: submissionCutHedgeLost},
+		{name: "hedge lost while transcoding", headersFirst: true, end: func(cancel context.CancelCauseFunc) { cancel(errHedgeLost) }, reason: submissionCutHedgeLost},
+		{name: "segment processing cancelled", end: func(cancel context.CancelCauseFunc) { cancel(nil) }, reason: submissionCutSegmentEnded},
+		{name: "segment budget ended while transcoding", headersFirst: true, deadline: 300 * time.Millisecond, reason: submissionCutSegmentEnded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uploads, bodies, cuts := observeSubmissionFailures(t)
+			serverCtx, stopServer := context.WithCancel(context.Background())
+			defer stopServer()
+			arrived := make(chan struct{}, 1)
+			sess := StubBroadcastSession(stubTestTranscoder(serverCtx, stalledOrchHandler(tc.headersFirst, arrived)))
+			sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+			sess.Params.Workload = core.WorkloadLive
+
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			if tc.deadline > 0 {
+				var stop context.CancelFunc
+				ctx, stop = context.WithTimeout(ctx, tc.deadline)
+				defer stop()
+				ctx = withSegmentBudget(ctx, resolveSegmentBudget(sess.Params, int(tc.deadline.Milliseconds()), 2.0, time.Now()))
+			}
+			go func() {
+				<-arrived
+				if tc.headersFirst {
+					// Let the response headers reach the gateway so the cut
+					// lands while it waits for the body.
+					time.Sleep(100 * time.Millisecond)
+				}
+				if tc.end != nil {
+					tc.end(cancel)
+				}
+			}()
+			_, err := SubmitSegment(ctx, sess.Clone(), &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}, nil, 0, false)
+			require.Error(t, err)
+			assert.Zero(t, uploads.Load(), "a cut submission is not an upload failure")
+			assert.Zero(t, bodies.Load(), "a cut submission is not a response failure")
+			assert.Equal(t, tc.reason, cuts.Load(), "a cut submission is counted once with its reason")
+		})
+	}
+}
+
+// An orchestrator that cannot be reached while the segment still wants its
+// answer is an upload failure.
+func TestSubmitSegment_UnreachableOrchestratorIsAnUploadFailure(t *testing.T) {
+	uploads, bodies, cuts := observeSubmissionFailures(t)
+	ts, _ := stubTLSServer()
+	ts.Close()
+	sess := StubBroadcastSession(ts.URL)
+	sess.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	_, err := SubmitSegment(context.Background(), sess.Clone(), &stream.HLSSegment{Data: []byte("dummy"), Duration: 2.0}, nil, 0, false)
+	require.Error(t, err)
+	assert.Equal(t, int32(1), uploads.Load())
+	assert.Zero(t, bodies.Load())
+	assert.Empty(t, cuts.Load())
+}

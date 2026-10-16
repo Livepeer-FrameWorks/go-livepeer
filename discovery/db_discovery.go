@@ -471,7 +471,6 @@ func (dbo *DBOrchestratorPoolCache) cacheOrchInfos() error {
 			errc <- fmt.Errorf("skipping orch=%v, URI not set", orch.URL.String())
 			return
 		}
-		start := time.Now()
 		var discoveryCh chan json.RawMessage
 		if dbo.useDiscoveryEndpoint {
 			discoveryCh = make(chan json.RawMessage, 1)
@@ -483,18 +482,18 @@ func (dbo *DBOrchestratorPoolCache) cacheOrchInfos() error {
 				discoveryCh <- discovery
 			}()
 		}
-		info, err := getOrchInfoRPC(ctx, dbo.bcast, uri, server.GetOrchestratorInfoParams{
+		attemptCtx, info, latency, err := getOrchInfoAttempt(ctx, getOrchInfoRPC, dbo.bcast, uri, orch.TargetIP, server.GetOrchestratorInfoParams{
 			IgnoreCapacityCheck: dbo.ignoreCapacityCheck,
 		})
-		latency := time.Since(start)
 
 		// Keep FrameWorks telemetry aligned with the regular orchestrator pool:
 		// emit at the raw RPC result boundary so reachable orchs still show on
 		// the map even if later DB-cache validation rejects the response.
-		emitFrameworksDiscovery(ctx, common.OrchestratorDescriptor{
+		emitFrameworksDiscovery(attemptCtx, common.OrchestratorDescriptor{
 			LocalInfo: &common.OrchestratorLocalInfo{
-				URL:   orch.URL,
-				Score: orch.Score,
+				URL:      orch.URL,
+				Score:    orch.Score,
+				TargetIP: orch.TargetIP,
 			},
 		}, info, err, latency)
 		if err != nil {

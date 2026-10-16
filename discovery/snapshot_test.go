@@ -9,17 +9,21 @@ import (
 	"testing"
 	"time"
 
+	fwpb "github.com/Livepeer-FrameWorks/monorepo/pkg/proto/ipc"
+	"github.com/Livepeer-FrameWorks/monorepo/pkg/telemetryspool"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/go-livepeer/common"
 	"github.com/livepeer/go-livepeer/core"
 	"github.com/livepeer/go-livepeer/eth"
 	lpTypes "github.com/livepeer/go-livepeer/eth/types"
+	"github.com/livepeer/go-livepeer/monitor/frameworks"
 	"github.com/livepeer/go-livepeer/net"
 	"github.com/livepeer/go-livepeer/pm"
 	"github.com/livepeer/go-livepeer/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 // failOnceEthClient fails the first TranscoderPool() call and then delegates to
@@ -475,4 +479,84 @@ func TestAsyncInitialDiscoverySelfHeals(t *testing.T) {
 	count, _ := pool.UsableOrchCount()
 	assert.GreaterOrEqual(count, 1)
 	assert.GreaterOrEqual(ethc.callCount(), 2, "TranscoderPool should have been retried")
+}
+
+// A DB-polled orchestrator's state update must carry the instance IP the
+// gateway dialed; analytics ingest keys per-instance state on it and drops
+// state updates without one.
+func TestCacheOrchInfos_StateUpdateCarriesDialedIP(t *testing.T) {
+	require := require.New(t)
+
+	spoolDir := t.TempDir()
+	t.Setenv("FRAMEWORKS_DECKLOG_GRPC_ADDR", "127.0.0.1:1")
+	t.Setenv("FRAMEWORKS_DECKLOG_TLS_MODE", "insecure")
+	t.Setenv("FRAMEWORKS_GATEWAY_ID", "db-poll-test")
+	t.Setenv("FRAMEWORKS_CLUSTER_ID", "test-cluster")
+	t.Setenv("FRAMEWORKS_CLUSTER_OWNER_TENANT_ID", "11111111-1111-4111-8111-111111111111")
+	t.Setenv("FRAMEWORKS_TELEMETRY_SPOOL_DIR", spoolDir)
+	t.Setenv("FRAMEWORKS_NETWORK_OBSERVER_URL", "")
+	telemetryCtx, cancel := context.WithCancel(context.Background())
+	require.NoError(frameworks.Init(telemetryCtx))
+	t.Cleanup(func() {
+		cancel()
+		t.Setenv("FRAMEWORKS_DECKLOG_GRPC_ADDR", "")
+		require.NoError(frameworks.Init(context.Background()))
+	})
+
+	const dialedIP = "192.0.2.10"
+	oldGet := serverGetOrchInfo
+	defer func() { serverGetOrchInfo = oldGet }()
+	inner := validOrchInfo()
+	serverGetOrchInfo = func(ctx context.Context, bcast common.Broadcaster, orchestratorServer *url.URL, params server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
+		// server.GetOrchestratorInfo records the gRPC peer address this way.
+		frameworks.SetRemoteIP(ctx, dialedIP)
+		return inner(ctx, bcast, orchestratorServer, params)
+	}
+
+	dbh, dbraw, err := common.TempDB(t)
+	require.NoError(err)
+	defer dbh.Close()
+	defer dbraw.Close()
+	for _, o := range sampleDBOrchs() {
+		require.NoError(dbh.UpdateOrch(o))
+	}
+	node := &core.LivepeerNode{
+		Database: dbh,
+		Eth:      &eth.StubClient{TotalStake: big.NewInt(0)},
+		Sender:   &pm.MockSender{},
+	}
+	dbo := &DBOrchestratorPoolCache{
+		store: dbh,
+		rm:    &stubRoundsManager{},
+		node:  node,
+		bcast: core.NewBroadcaster(node),
+	}
+	require.NoError(dbo.cacheOrchInfos())
+
+	reader, err := telemetryspool.Open(telemetryspool.Config{Directory: spoolDir})
+	require.NoError(err)
+	var state *fwpb.OrchestratorStateUpdate
+	var discovered *fwpb.OrchestratorDiscoveryObserved
+	require.Eventually(func() bool {
+		rows, err := reader.Pending(100)
+		if err != nil {
+			return false
+		}
+		for _, row := range rows {
+			var event fwpb.GatewayTelemetryEvent
+			if proto.Unmarshal(row.Payload, &event) != nil {
+				continue
+			}
+			if s := event.GetState(); s != nil {
+				state = s
+			}
+			if d := event.GetDiscovery(); d != nil {
+				discovered = d
+			}
+		}
+		return state != nil && discovered != nil
+	}, 5*time.Second, 10*time.Millisecond, "DB poll must emit discovery and state telemetry")
+	require.Equal(dialedIP, state.GetVantage().GetResolvedIp(), "orchestrator_state_update must carry the dialed instance IP")
+	require.True(state.GetVantage().GetDialed())
+	require.Equal(dialedIP, discovered.GetVantage().GetResolvedIp(), "discovery observation must carry the dialed instance IP")
 }

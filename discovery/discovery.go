@@ -59,7 +59,7 @@ type orchestratorPool struct {
 	ignoreCapacityCheck bool
 	node                core.LivepeerNode
 	extraNodes          int
-	getOrchInfo         func(context.Context, common.Broadcaster, *url.URL, server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error)
+	getOrchInfo         getOrchInfoFunc
 }
 
 func NewOrchestratorPool(bcast common.Broadcaster, uris []*url.URL, score float32, orchBlacklist []string, discoveryTimeout time.Duration) *orchestratorPool {
@@ -183,13 +183,10 @@ func (o *orchestratorPool) GetOrchestrators(ctx context.Context, numOrchestrator
 	var getOrchInfo func(ctx context.Context, od common.OrchestratorDescriptor, level int, infoCh chan common.OrchestratorDescriptor, errCh chan error, allOrchInfoCh chan common.OrchestratorDescriptor)
 
 	getOrchInfo = func(ctx context.Context, od common.OrchestratorDescriptor, level int, infoCh chan common.OrchestratorDescriptor, errCh chan error, allOrchInfoCh chan common.OrchestratorDescriptor) {
-		ctx = frameworks.WithAttempt(ctx, od.LocalInfo.TargetIP)
-		start := time.Now()
-		info, err := o.getOrchInfo(ctx, o.bcast, od.LocalInfo.URL, server.GetOrchestratorInfoParams{
+		ctx, info, latency, err := getOrchInfoAttempt(ctx, o.getOrchInfo, o.bcast, od.LocalInfo.URL, od.LocalInfo.TargetIP, server.GetOrchestratorInfoParams{
 			Caps:                caps.ToNetCapabilities(),
 			IgnoreCapacityCheck: o.ignoreCapacityCheck,
 		})
-		latency := time.Since(start)
 		clog.V(common.DEBUG).Infof(ctx, "Received GetOrchInfo RPC Response from uri=%v, latency=%v", od.LocalInfo.URL, latency)
 		doingWork := info != nil && info.Transcoder != ""
 
@@ -452,9 +449,23 @@ func discoveryOrchAddr(od common.OrchestratorDescriptor, info *net.OrchestratorI
 	return "url:" + od.LocalInfo.URL.Host
 }
 
+type getOrchInfoFunc func(context.Context, common.Broadcaster, *url.URL, server.GetOrchestratorInfoParams) (*net.OrchestratorInfo, error)
+
+// getOrchInfoAttempt runs one GetOrchestratorInfo RPC under its own socket
+// attribution. The returned context carries the IP the RPC connected to, which
+// emitFrameworksDiscovery needs to attribute discovery and per-instance state.
+func getOrchInfoAttempt(ctx context.Context, rpc getOrchInfoFunc, bcast common.Broadcaster, uri *url.URL, targetIP string, params server.GetOrchestratorInfoParams) (context.Context, *net.OrchestratorInfo, time.Duration, error) {
+	ctx = frameworks.WithAttempt(ctx, targetIP)
+	start := time.Now()
+	info, err := rpc(ctx, bcast, uri, params)
+	return ctx, info, time.Since(start), err
+}
+
 // emitFrameworksDiscovery sends per-attempt discovery + per-instance state
 // events to FrameWorks Decklog. Called from getOrchInfo at the result/error
-// boundary so failed dials are durable. The state emission is per-instance
+// boundary so failed dials are durable. ctx must be the attempt context
+// returned by getOrchInfoAttempt; without it no resolved IP is known and
+// analytics ingest drops the state update. The state emission is per-instance
 // (resolved IP) — pricing/capabilities/hardware can legitimately differ
 // across instances of the same orch's load-balanced pool, so the receiving
 // table keys per IP, not per orch_addr. See
