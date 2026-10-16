@@ -1918,3 +1918,101 @@ func TestBudgetedMaxAttempts(t *testing.T) {
 	live := segmentBudget{total: 3 * time.Second}
 	assert.Equal(MaxAttempts, budgetedMaxAttempts(live, 2.0), "never fewer than MaxAttempts")
 }
+
+// Starting a hedge can take as long as an orchestrator round trip: an idle
+// hedge session whose auth token expired is refreshed with GetOrchestratorInfo
+// first. A primary that answers meanwhile is used at once, and the hedge whose
+// set-up was overtaken is neither submitted nor paid.
+func TestProcessSegment_PrimaryAnswerDuringHedgeSetupIsUsedAtOnce(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const refreshTook = 500 * time.Millisecond
+	oldRPC := getOrchestratorInfoRPC
+	defer func() { getOrchestratorInfoRPC = oldRPC }()
+	var refreshes atomic.Int32
+	var primaryCalls, hedgeCalls atomic.Int32
+	// The primary answers 100 ms after the hedge timer (0.6 x 1 s) fires.
+	primary := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 700*time.Millisecond, "", &primaryCalls)))
+	hedge := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &hedgeCalls)))
+	primary.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	hedge.Params.Profiles = primary.Params.Profiles
+	expired := proto.Clone(hedge.OrchestratorInfo).(*net.OrchestratorInfo)
+	expired.AuthToken = &net.AuthToken{Token: []byte("foo"), SessionId: "stale", Expiration: time.Now().Add(-time.Hour).Unix()}
+	hedge.OrchestratorInfo = expired
+	getOrchestratorInfoRPC = func(ctx context.Context, _ common.Broadcaster, _ *url.URL, _ GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
+		refreshes.Add(1)
+		select {
+		case <-time.After(refreshTook):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		fresh := proto.Clone(expired).(*net.OrchestratorInfo)
+		fresh.AuthToken = stubAuthToken
+		return fresh, nil
+	}
+	oldSubmit := submitMultiSession
+	defer func() { submitMultiSession = oldSubmit }()
+	var hedgeSubmissions atomic.Int32
+	submitMultiSession = func(ctx context.Context, sess *BroadcastSession, seg *stream.HLSSegment, segPar *core.SegmentParameters, nonce uint64, resc chan *SubmitResult) {
+		if sess == hedge {
+			hedgeSubmissions.Add(1)
+		}
+		oldSubmit(ctx, sess, seg, segPar, nonce, resc)
+	}
+	// LIFOSelector pops the last added session first.
+	bsm := bsmWithSessListExt([]*BroadcastSession{hedge, primary}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	urls, took, _, err := processBudgeted(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0})
+	require.NoError(t, err)
+	assert.Len(urls, 1)
+	assert.EqualValues(1, primaryCalls.Load())
+	assert.Less(took, 900*time.Millisecond, "the primary's answer must not wait for the hedge set-up")
+	assert.Eventually(func() bool { return refreshes.Load() == 1 }, time.Second, 10*time.Millisecond)
+	time.Sleep(refreshTook)
+	assert.Zero(hedgeSubmissions.Load(), "a hedge overtaken by the primary's answer is not submitted or paid")
+	assert.Zero(hedgeCalls.Load())
+	assert.Eventually(func() bool {
+		bsm.sessLock.Lock()
+		defer bsm.sessLock.Unlock()
+		bsm.trustedPool.lock.Lock()
+		defer bsm.trustedPool.lock.Unlock()
+		return bsm.trustedPool.inSel[hedge]
+	}, time.Second, 10*time.Millisecond, "the unused hedge session goes back to the selector")
+	assert.Empty(hedge.SegsInFlight)
+}
+
+// A primary that fails while the hedge is still being set up leaves the hedge
+// to answer the segment once it is ready.
+func TestProcessSegment_PrimaryFailureDuringHedgeSetupKeepsTheHedge(t *testing.T) {
+	assert := assert.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldRPC := getOrchestratorInfoRPC
+	defer func() { getOrchestratorInfoRPC = oldRPC }()
+	var primaryCalls, hedgeCalls atomic.Int32
+	primary := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 700*time.Millisecond, "OrchestratorBusy", &primaryCalls)))
+	hedge := StubBroadcastSession(stubTestTranscoder(ctx, orchResultHandler(t, 0, "", &hedgeCalls)))
+	primary.Params.Profiles = []ffmpeg.VideoProfile{ffmpeg.P144p30fps16x9}
+	hedge.Params.Profiles = primary.Params.Profiles
+	expired := proto.Clone(hedge.OrchestratorInfo).(*net.OrchestratorInfo)
+	expired.AuthToken = &net.AuthToken{Token: []byte("foo"), SessionId: "stale", Expiration: time.Now().Add(-time.Hour).Unix()}
+	hedge.OrchestratorInfo = expired
+	getOrchestratorInfoRPC = func(ctx context.Context, _ common.Broadcaster, _ *url.URL, _ GetOrchestratorInfoParams) (*net.OrchestratorInfo, error) {
+		time.Sleep(300 * time.Millisecond)
+		fresh := proto.Clone(expired).(*net.OrchestratorInfo)
+		fresh.AuthToken = stubAuthToken
+		return fresh, nil
+	}
+	bsm := bsmWithSessListExt([]*BroadcastSession{hedge, primary}, nil, true)
+	cxn := budgetTestConnection(bsm)
+
+	urls, _, _, err := processBudgeted(ctx, cxn, &stream.HLSSegment{Data: []byte("dummy"), Duration: 1.0})
+	require.NoError(t, err)
+	assert.Len(urls, 1)
+	assert.EqualValues(1, primaryCalls.Load())
+	assert.EqualValues(1, hedgeCalls.Load(), "the hedge answers the segment the primary failed")
+}

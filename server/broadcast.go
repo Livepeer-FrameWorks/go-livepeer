@@ -1495,6 +1495,21 @@ type submission struct {
 	setup bool
 }
 
+// hedgeSetup is a hedge session made ready for submission; err is set when
+// it could not be made ready, sess is nil when no session was available.
+type hedgeSetup struct {
+	sess *BroadcastSession
+	seg  *stream.HLSSegment
+	err  error
+}
+
+// release hands an unsubmitted hedge session back to its pool.
+func (h hedgeSetup) release(bsm *BroadcastSessionsManager) {
+	if h.sess != nil && h.err == nil {
+		bsm.releaseSession(h.sess)
+	}
+}
+
 // submitHedged submits seg to primary and, when the segment has a budget and
 // primary has not answered within hedgeDelay, also to one more orchestrator.
 // The first successful result wins and the other submission is cancelled.
@@ -1505,7 +1520,10 @@ type submission struct {
 // orchestrator. It counts as a slow strike only when it already ran longer
 // than the workload tolerates and did not pay for a session setup.
 // At most one hedge is started per attempt, so a hedged segment costs one
-// extra payment.
+// extra payment. Getting the hedge ready can take an orchestrator round trip
+// (refreshing an idle session's expired auth token or ticket params), so it
+// runs beside the result loop: an answer that arrives meanwhile is used at
+// once, and a hedge it overtook is handed back unsubmitted and unpaid.
 func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSession, seg *stream.HLSSegment, name string,
 	segPar *core.SegmentParameters) (*BroadcastSession, *stream.HLSSegment, *ReceivedTranscodeResult, time.Duration, error) {
 
@@ -1514,17 +1532,12 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 	resc := make(chan *SubmitResult, 2)
 	var subs []*submission
 
-	start := func(sess *BroadcastSession) error {
-		segOut, err := prepareForTranscoding(ctx, cxn, sess, seg, name)
-		if err != nil {
-			return &orchError{orch: sess.Transcoder(), err: err}
-		}
+	submit := func(sess *BroadcastSession, segOut *stream.HLSSegment) {
 		sess.pushSegInFlight(segOut)
 		sctx, cancel := context.WithCancelCause(ctx)
 		subs = append(subs, &submission{sess: sess, seg: segOut, start: time.Now(), cancel: cancel, setup: sess.inSessionSetup()})
 		frameworks.SegmentSubmitted(ctx, sess.Transcoder())
 		submitMultiSession(sctx, sess, segOut, segPar, cxn.nonce, resc)
-		return nil
 	}
 	find := func(sess *BroadcastSession) *submission {
 		for _, s := range subs {
@@ -1535,9 +1548,25 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 		return nil
 	}
 
-	if err := start(primary); err != nil {
-		return nil, nil, nil, 0, err
+	segOut, err := prepareForTranscoding(ctx, cxn, primary, seg, name)
+	if err != nil {
+		return nil, nil, nil, 0, &orchError{orch: primary.Transcoder(), err: err}
 	}
+	submit(primary, segOut)
+
+	// hedgeReady delivers the hedge set up after hedgeC fired. A hedge still
+	// being set up when this function returns is handed back to its pool
+	// once ready.
+	hedgeReady := make(chan hedgeSetup, 1)
+	preparing := false
+	defer func() {
+		if preparing {
+			go func() { (<-hedgeReady).release(bsm) }()
+		}
+	}()
+	// done wakes the loop when the segment's processing ends, so it stops
+	// waiting for a hedge set-up that can no longer be submitted.
+	done := ctx.Done()
 
 	var hedgeC <-chan time.Time
 	if budgeted {
@@ -1549,8 +1578,36 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 	hedged := false
 	inflight := 1
 	var lastErr error
-	for inflight > 0 {
+	for inflight > 0 || (preparing && ctx.Err() == nil) {
 		select {
+		case <-done:
+			done = nil
+		case h := <-hedgeReady:
+			preparing = false
+			if h.sess == nil {
+				clog.V(common.DEBUG).Infof(ctx, "No hedge orchestrator available orch=%s", primary.Transcoder())
+				continue
+			}
+			if h.err != nil {
+				// prepareForTranscoding already suspended and removed it.
+				clog.Warningf(ctx, "Could not start hedge orch=%s err=%q", h.sess.Transcoder(), h.err)
+				continue
+			}
+			if len(resc) > 0 {
+				// A result arrived while the hedge was set up; handle it
+				// first, it may make the hedge unnecessary.
+				preparing = true
+				hedgeReady <- h
+				continue
+			}
+			if ctx.Err() != nil {
+				h.release(bsm)
+				continue
+			}
+			submit(h.sess, h.seg)
+			hedged = true
+			inflight++
+			clog.Infof(ctx, "Hedging segment: orch=%s has not answered, also submitting to orch=%s", primary.Transcoder(), h.sess.Transcoder())
 		case r := <-resc:
 			inflight--
 			sub := find(r.Session)
@@ -1616,19 +1673,17 @@ func submitHedged(ctx context.Context, cxn *rtmpConnection, primary *BroadcastSe
 				clog.V(common.DEBUG).Infof(ctx, "Segment already hedged once; not hedging orch=%s", primary.Transcoder())
 				continue
 			}
-			hedge := bsm.selectHedgeSession(ctx, primary)
-			if hedge == nil {
-				clog.V(common.DEBUG).Infof(ctx, "No hedge orchestrator available orch=%s", primary.Transcoder())
-				continue
-			}
-			if err := start(hedge); err != nil {
-				// prepareForTranscoding already suspended and removed it.
-				clog.Warningf(ctx, "Could not start hedge orch=%s err=%q", hedge.Transcoder(), err)
-				continue
-			}
-			hedged = true
-			inflight++
-			clog.Infof(ctx, "Hedging segment: orch=%s has not answered, also submitting to orch=%s", primary.Transcoder(), hedge.Transcoder())
+			preparing = true
+			// The set-up outlives this function when the primary answers
+			// first, so it must not fail, and suspend the hedge orchestrator,
+			// only because the segment no longer needs it.
+			go func(ctx context.Context) {
+				var h hedgeSetup
+				if h.sess = bsm.selectHedgeSession(ctx, primary); h.sess != nil {
+					h.seg, h.err = prepareForTranscoding(ctx, cxn, h.sess, seg, name)
+				}
+				hedgeReady <- h
+			}(context.WithoutCancel(ctx))
 		}
 	}
 	if hedged && monitor.Enabled {
