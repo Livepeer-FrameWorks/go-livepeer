@@ -53,9 +53,12 @@ type BasicPlaylistManager struct {
 	recordSession  drivers.OSSession
 	manifestID     ManifestID
 	// Live playlist used for broadcasting
-	masterPList        *m3u8.MasterPlaylist
-	mediaLists         map[string]*m3u8.MediaPlaylist
-	mapSync            *sync.RWMutex
+	masterPList *m3u8.MasterPlaylist
+	mediaLists  map[string]*m3u8.MediaPlaylist
+	mapSync     *sync.RWMutex
+	// insertSync makes InsertHLSSegment's make-room-then-insert one step:
+	// segments of a stream are processed concurrently.
+	insertSync         sync.Mutex
 	jsonList           *JsonPlaylist
 	jsonListWriteQueue *drivers.OverwriteQueue
 	jsonListSync       *sync.Mutex
@@ -328,13 +331,13 @@ func (mgr *BasicPlaylistManager) InsertHLSSegment(profile *ffmpeg.VideoProfile, 
 		return err
 	}
 	mseg := newMediaSegment(uri, duration)
+	// The playlist's capacity is its window, so a full one makes room first;
+	// its own Remove advances the media sequence number.
+	mgr.insertSync.Lock()
+	defer mgr.insertSync.Unlock()
 	if mpl.Count() >= mpl.WinSize() {
 		mpl.Remove()
 	}
-	if mpl.Count() == 0 {
-		mpl.SeqNo = mseg.SeqId
-	}
-
 	return mpl.InsertSegment(seqNo, mseg)
 }
 

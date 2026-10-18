@@ -3,7 +3,10 @@ package core
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,5 +309,45 @@ func TestCleanup(t *testing.T) {
 	data = memoryOS.GetData("testPath/testName")
 	if data != nil {
 		t.Fatal("Data should be cleaned up")
+	}
+}
+
+// Segments of one stream are processed concurrently (a processSegment goroutine
+// per segment) while players fetch the media playlist. Every new segment must
+// land in the live window, and none may be lost to a full playlist.
+func TestInsertHLSSegmentConcurrentSegmentsKeepTheWindow(t *testing.T) {
+	c := NewBasicPlaylistManager(RandomManifestID(), nil, nil)
+	vProfile := ffmpeg.P144p30fps16x9
+	vProfile.Name = "source"
+	const segments = 200
+	var wg sync.WaitGroup
+	errs := make(chan error, segments)
+	for i := 0; i < segments; i++ {
+		wg.Add(2)
+		go func(seq uint64) {
+			defer wg.Done()
+			if err := c.InsertHLSSegment(&vProfile, seq, fmt.Sprintf("seg/%d.ts", seq), 2); err != nil &&
+				!errors.Is(err, m3u8.ErrSegmentAlreadyExists) {
+				errs <- fmt.Errorf("segment %d: %w", seq, err)
+			}
+		}(uint64(i))
+		go func() {
+			defer wg.Done()
+			if pl := c.GetHLSMediaPlaylist(vProfile.Name); pl != nil {
+				pl.Encode()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	pl := c.GetHLSMediaPlaylist(vProfile.Name)
+	if pl == nil {
+		t.Fatal("no media playlist")
+	}
+	if got := pl.Count(); got != LIVE_LIST_LENGTH {
+		t.Fatalf("playlist holds %d segments, want the full %d-segment window", got, LIVE_LIST_LENGTH)
 	}
 }
