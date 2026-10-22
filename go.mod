@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	contrib.go.opencensus.io/exporter/prometheus v0.4.2
-	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261011054507-0540e67c18f5
+	github.com/Livepeer-FrameWorks/monorepo/pkg v0.0.0-20261022154405-b5cfbbcebc58
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/bluenviron/gortsplib/v4 v4.12.3
